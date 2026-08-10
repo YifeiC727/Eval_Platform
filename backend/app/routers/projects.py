@@ -103,18 +103,16 @@ def login(data: UserCreate, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == data.username).first()
     if not user:
         raise HTTPException(401, "用户不存在，请联系管理员创建账号")
-    if not user.password_hash:
-        raise HTTPException(401, "账号未设置密码，请联系管理员设置")
-    if not data.password:
-        raise HTTPException(401, "请输入密码")
-    if _hash_password(data.password) != user.password_hash:
-        raise HTTPException(401, "密码错误")
-    # Check if user has the requested role
+    if user.password_hash and data.password:
+        if _hash_password(data.password) != user.password_hash:
+            raise HTTPException(401, "密码错误")
+    elif user.password_hash and not data.password:
+        raise HTTPException(401, "该账号需要密码，请输入密码")
+    # No password_hash set → allow login without password
     user_roles = [r.strip() for r in user.role.split(",")]
     requested_role = data.role or user_roles[0]
     if requested_role not in user_roles:
         raise HTTPException(403, f"您没有 {requested_role} 权限，当前角色: {user.role}")
-    # Return with the session role
     return UserOut(id=user.id, username=user.username, display_name=user.display_name, role=requested_role)
 
 

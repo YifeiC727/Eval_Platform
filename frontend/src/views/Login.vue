@@ -9,8 +9,8 @@
         <el-form-item label="ERP工号 / 用户名">
           <el-input v-model="username" placeholder="输入ERP工号或用户名" size="large" />
         </el-form-item>
-        <el-form-item label="密码">
-          <el-input v-model="password" type="password" placeholder="输入密码" size="large" show-password />
+        <el-form-item label="密码（如已设置则必填）">
+          <el-input v-model="password" type="password" placeholder="未设置密码可留空" size="large" show-password />
         </el-form-item>
         <el-form-item label="登录身份">
           <el-select v-model="role" size="large" style="width: 100%;">
