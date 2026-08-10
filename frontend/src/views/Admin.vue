@@ -95,6 +95,10 @@
                   <span>待比对检查点</span>
                   <el-tag type="info">{{ overview.adjudication?.ready_for_compare || 0 }}</el-tag>
                 </div>
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                  <span>不适用(NA)</span>
+                  <el-tag>{{ Math.max(0, (overview.adjudication?.finalized || 0) > 0 ? overview.total_checkpoints - (overview.adjudication?.finalized || 0) - (overview.adjudication?.pending_third || 0) - (overview.adjudication?.pending_expert || 0) - (overview.adjudication?.ready_for_compare || 0) : 0) }}</el-tag>
+                </div>
               </div>
             </el-card>
           </el-col>
@@ -138,7 +142,10 @@
             <el-select v-model="monitorProject" placeholder="选择项目" style="width: 200px;" @change="loadProgress">
               <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
             </el-select>
-            <el-select v-model="monitorFilter" placeholder="筛选状态" clearable style="width: 160px;" @change="loadProgress">
+            <el-select v-model="monitorAnnotator" placeholder="按标注员筛选" clearable style="width: 150px;">
+              <el-option v-for="u in annotators" :key="u.id" :label="u.display_name || u.username" :value="u.display_name || u.username" />
+            </el-select>
+            <el-select v-model="monitorFilter" placeholder="筛选状态" clearable style="width: 140px;">
               <el-option label="全部" value="" />
               <el-option label="未分配" value="未分配" />
               <el-option label="已分配待标注" value="已分配待标注" />
@@ -162,6 +169,11 @@
           <el-table-column prop="annotator_b" label="B" width="80" />
           <el-table-column prop="annotator_third" label="第三人" width="80" />
           <el-table-column prop="finalized" label="定案数" width="70" />
+          <el-table-column label="操作" width="100">
+            <template #default="{ row }">
+              <el-button size="small" type="primary" link @click="viewComparison(row.video_id)">查看详情</el-button>
+            </template>
+          </el-table-column>
         </el-table>
         <el-pagination v-if="progressTotal > 50" layout="prev, pager, next"
           :total="progressTotal" :page-size="50" v-model:current-page="progressPage"
@@ -541,6 +553,7 @@ const progressTotal = ref(0)
 const progressPage = ref(1)
 const monitorFilter = ref('')
 const monitorProject = ref(null)
+const monitorAnnotator = ref('')
 const searchQuery = ref('')
 const searchAbility = ref('')
 const searchResults = ref([])
@@ -588,8 +601,14 @@ const aiPlan = ref([])
 
 const annotators = computed(() => users.value.filter(u => u.role === 'annotator'))
 const filteredProgress = computed(() => {
-  if (!monitorFilter.value) return progressItems.value
-  return progressItems.value.filter(p => p.status === monitorFilter.value)
+  let list = progressItems.value
+  if (monitorFilter.value) {
+    list = list.filter(p => p.status === monitorFilter.value)
+  }
+  if (monitorAnnotator.value) {
+    list = list.filter(p => p.annotator_a === monitorAnnotator.value || p.annotator_b === monitorAnnotator.value || p.annotator_third === monitorAnnotator.value)
+  }
+  return list
 })
 
 function statusType(status) {

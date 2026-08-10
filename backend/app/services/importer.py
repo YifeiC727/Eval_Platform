@@ -16,7 +16,7 @@ def import_checkpoints_xlsx(db: Session, file_path: str, project_id: int) -> dic
             if not row[0]:
                 continue
             q_id = str(row[0]).strip()
-            existing = db.query(Question).filter(Question.question_id == q_id).first()
+            existing = db.query(Question).filter(Question.question_id == q_id, Question.project_id == project_id).first()
             if existing:
                 stats["skipped"] += 1
                 continue
@@ -40,12 +40,14 @@ def import_checkpoints_xlsx(db: Session, file_path: str, project_id: int) -> dic
             q_id = str(row[0]).strip()
             cp_id = str(row[1]).strip()
 
-            existing = db.query(Checkpoint).filter(Checkpoint.checkpoint_id == cp_id).first()
+            existing = db.query(Checkpoint).join(Question).filter(
+                Checkpoint.checkpoint_id == cp_id, Question.project_id == project_id
+            ).first()
             if existing:
                 stats["skipped"] += 1
                 continue
 
-            question = db.query(Question).filter(Question.question_id == q_id).first()
+            question = db.query(Question).filter(Question.question_id == q_id, Question.project_id == project_id).first()
             if not question:
                 continue
 
@@ -67,6 +69,24 @@ def import_checkpoints_xlsx(db: Session, file_path: str, project_id: int) -> dic
             )
             db.add(cp)
             stats["checkpoints"] += 1
+
+    # Auto-create Video records for questions that don't have one
+    questions = db.query(Question).filter(Question.project_id == project_id).all()
+    videos_created = 0
+    for q in questions:
+        existing_video = db.query(Video).filter(Video.question_id == q.id).first()
+        if not existing_video:
+            seq = q.question_id.replace("Q", "")
+            v = Video(
+                video_id=f"V{seq}",
+                question_id=q.id,
+                model_version=db.query(Project).filter(Project.id == project_id).first().model_version,
+                oss_url="",
+                duration_sec=10.0,
+            )
+            db.add(v)
+            videos_created += 1
+    stats["videos_created"] = videos_created
 
     db.commit()
     wb.close()

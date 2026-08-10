@@ -64,7 +64,7 @@ class Project(Base):
 class Question(Base):
     __tablename__ = "questions"
     id = Column(Integer, primary_key=True, index=True)
-    question_id = Column(String(20), unique=True, nullable=False)
+    question_id = Column(String(20), nullable=False)
     project_id = Column(Integer, ForeignKey("projects.id"))
     prompt = Column(Text, nullable=False)
     language = Column(String(20))
@@ -78,7 +78,7 @@ class Question(Base):
 class Video(Base):
     __tablename__ = "videos"
     id = Column(Integer, primary_key=True, index=True)
-    video_id = Column(String(20), unique=True, nullable=False)
+    video_id = Column(String(20), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"))
     model_version = Column(String(50))
     oss_url = Column(Text)
@@ -92,7 +92,7 @@ class Video(Base):
 class Checkpoint(Base):
     __tablename__ = "checkpoints"
     id = Column(Integer, primary_key=True, index=True)
-    checkpoint_id = Column(String(30), unique=True, nullable=False)
+    checkpoint_id = Column(String(30), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"))
     seq = Column(Integer)
     text = Column(Text, nullable=False)

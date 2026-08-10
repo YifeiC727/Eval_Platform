@@ -81,7 +81,7 @@ def export_my_annotations(user_id: int = None, db: Session = Depends(get_db)):
     wb.save(output)
     output.seek(0)
 
-    filename = f"{user.display_name or user.username}_annotations.xlsx"
+    filename = f"{user.username}_annotations.xlsx"
     return StreamingResponse(
         output,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
