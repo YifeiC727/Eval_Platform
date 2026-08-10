@@ -3,15 +3,27 @@
     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
       <h2 style="margin: 0;">我的任务</h2>
       <div style="display: flex; gap: 12px; align-items: center;">
-        <el-tag v-if="todaySubmitted > 0" type="success">今日已提交 {{ todaySubmitted }} 个</el-tag>
+        <el-tag v-if="completedTasks.length > 0" type="warning">已完成 {{ completedTasks.length }} 题</el-tag>
         <el-tag>共 {{ tasks.length }} 个任务</el-tag>
+        <el-button size="small" @click="exportMy" :disabled="completedTasks.length === 0 && submittedTasks.length === 0">
+          导出我的标注
+        </el-button>
+        <el-button type="primary" @click="submitAll" :loading="submittingAll"
+          :disabled="!canSubmitAll">
+          全部提交锁定
+        </el-button>
       </div>
     </div>
 
+    <el-alert v-if="!canSubmitAll && completedTasks.length > 0 && pendingTasks.length > 0"
+      type="warning" :closable="false" style="margin-bottom: 16px;">
+      还有 {{ pendingTasks.length }} 题未完成，需全部完成或标记技术无效后才能提交锁定。
+    </el-alert>
+
     <el-tabs v-model="activeTab">
       <el-tab-pane :label="`待完成 (${pendingTasks.length})`" name="pending" />
-      <el-tab-pane :label="`进行中 (${inProgressTasks.length})`" name="in_progress" />
-      <el-tab-pane :label="`已提交 (${submittedTasks.length})`" name="submitted" />
+      <el-tab-pane :label="`已完成 (${completedTasks.length})`" name="completed" />
+      <el-tab-pane :label="`已锁定 (${submittedTasks.length})`" name="submitted" />
     </el-tabs>
 
     <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 16px;">
@@ -31,8 +43,8 @@
           </div>
           <div style="display: flex; gap: 8px; align-items: center;">
             <el-tag v-if="task.role === 'third'" type="danger" size="small" effect="dark">高优先级</el-tag>
-            <el-tag :type="task.status === 'submitted' ? 'success' : task.status === 'in_progress' ? 'warning' : 'info'" size="small">
-              {{ task.status === 'submitted' ? '已提交' : task.status === 'in_progress' ? '进行中' : '待开始' }}
+            <el-tag :type="task.status === 'submitted' ? 'success' : task.status === 'completed' ? 'warning' : task.status === 'issue_reported' ? 'danger' : 'info'" size="small">
+              {{ task.status === 'submitted' ? '已锁定' : task.status === 'completed' ? '已完成' : task.status === 'issue_reported' ? '技术无效' : '待标注' }}
             </el-tag>
           </div>
         </div>
@@ -66,30 +78,31 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api.js'
 
 const router = useRouter()
 const tasks = ref([])
 const activeTab = ref('pending')
+const submittingAll = ref(false)
 
-const pendingTasks = computed(() => tasks.value.filter(t => t.status === 'pending'))
-const inProgressTasks = computed(() => tasks.value.filter(t => t.status === 'in_progress'))
+const pendingTasks = computed(() => tasks.value.filter(t => t.status === 'pending' || t.status === 'in_progress'))
+const completedTasks = computed(() => tasks.value.filter(t => t.status === 'completed'))
 const submittedTasks = computed(() => tasks.value.filter(t => t.status === 'submitted'))
 
+const canSubmitAll = computed(() => {
+  if (tasks.value.length === 0) return false
+  return tasks.value.every(t => t.status === 'completed' || t.status === 'submitted' || t.status === 'issue_reported' || t.status === 'invalidated')
+})
+
 const currentTasks = computed(() => {
-  const map = { pending: pendingTasks, in_progress: inProgressTasks, submitted: submittedTasks }
+  const map = { pending: pendingTasks, completed: completedTasks, submitted: submittedTasks }
   const list = map[activeTab.value]?.value || []
   return [...list].sort((a, b) => {
     if (a.role === 'third' && b.role !== 'third') return -1
     if (b.role === 'third' && a.role !== 'third') return 1
     return 0
   })
-})
-
-const todaySubmitted = computed(() => {
-  const today = new Date().toISOString().slice(0, 10)
-  return submittedTasks.value.filter(t => t.submitted_at?.startsWith(today)).length
 })
 
 onMounted(async () => {
@@ -106,5 +119,34 @@ onMounted(async () => {
 function openTask(task) {
   if (task.status === 'submitted') return
   router.push(`/annotate/${task.id}`)
+}
+
+function exportMy() {
+  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  window.open(`/api/export/my-annotations?user_id=${user.id}`, '_blank')
+}
+
+async function submitAll() {
+  try {
+    await ElMessageBox.confirm(
+      `确认全部提交锁定？共 ${completedTasks.value.length} 题将被锁定，提交后不可修改。`,
+      '全部提交锁定',
+      { type: 'warning', confirmButtonText: '确认提交', cancelButtonText: '取消' }
+    )
+  } catch { return }
+
+  submittingAll.value = true
+  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  try {
+    const { data } = await api.post('/annotations/submit-all', { user_id: user.id })
+    ElMessage.success(`已锁定 ${data.locked_count} 题`)
+    // Reload tasks
+    const { data: newTasks } = await api.get('/assignments/my', { params: { user_id: user.id } })
+    tasks.value = newTasks
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '提交失败')
+  } finally {
+    submittingAll.value = false
+  }
 }
 </script>

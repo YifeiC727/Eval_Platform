@@ -32,6 +32,40 @@ def get_project(project_id: int, db: Session = Depends(get_db)):
     return p
 
 
+@router.delete("/{project_id}")
+def delete_project(project_id: int, db: Session = Depends(get_db)):
+    from app.models import Question, Video, Checkpoint, Assignment, Annotation, FinalResult
+
+    p = db.query(Project).filter(Project.id == project_id).first()
+    if not p:
+        raise HTTPException(404, "project not found")
+
+    questions = db.query(Question).filter(Question.project_id == project_id).all()
+    q_ids = [q.id for q in questions]
+
+    if q_ids:
+        video_ids = [v.id for v in db.query(Video).filter(Video.question_id.in_(q_ids)).all()]
+        cp_ids = [cp.id for cp in db.query(Checkpoint).filter(Checkpoint.question_id.in_(q_ids)).all()]
+
+        if video_ids:
+            assignment_ids = [a.id for a in db.query(Assignment).filter(Assignment.video_id.in_(video_ids)).all()]
+            if assignment_ids:
+                db.query(Annotation).filter(Annotation.assignment_id.in_(assignment_ids)).delete(synchronize_session=False)
+            db.query(Assignment).filter(Assignment.video_id.in_(video_ids)).delete(synchronize_session=False)
+            db.query(FinalResult).filter(FinalResult.video_id.in_(video_ids)).delete(synchronize_session=False)
+            db.query(Video).filter(Video.id.in_(video_ids)).delete(synchronize_session=False)
+
+        if cp_ids:
+            db.query(FinalResult).filter(FinalResult.checkpoint_id.in_(cp_ids)).delete(synchronize_session=False)
+            db.query(Checkpoint).filter(Checkpoint.id.in_(cp_ids)).delete(synchronize_session=False)
+
+        db.query(Question).filter(Question.id.in_(q_ids)).delete(synchronize_session=False)
+
+    db.delete(p)
+    db.commit()
+    return {"status": "deleted", "project": p.name}
+
+
 import hashlib
 
 users_router = APIRouter(prefix="/api/users", tags=["users"])
@@ -51,6 +85,7 @@ def create_user(data: UserCreate, db: Session = Depends(get_db)):
         display_name=data.display_name,
         role=data.role,
         password_hash=_hash_password(data.password) if data.password else None,
+        password_plain=data.password if data.password else None,
     )
     db.add(u)
     db.commit()
@@ -92,5 +127,14 @@ def set_password(user_id: int, data: dict, db: Session = Depends(get_db)):
     if not new_password or len(new_password) < 4:
         raise HTTPException(400, "密码至少4位")
     user.password_hash = _hash_password(new_password)
+    user.password_plain = new_password
     db.commit()
     return {"status": "ok"}
+
+
+@users_router.get("/{user_id}/password")
+def get_password(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "user not found")
+    return {"password": user.password_plain or "(未设置)"}

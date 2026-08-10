@@ -3,7 +3,7 @@ from sqlalchemy import func
 from app.models import FinalResult, Checkpoint, Assignment, Annotation
 
 
-SCORE_MAP = {"C": 1.0, "R": 0.3, "N": 0.0}
+SCORE_MAP = {"C": 1.0, "R": 0.3, "N": 0.0, "NA": None}
 
 
 def compute_ability_scores(db: Session, project_id: int = None) -> list[dict]:

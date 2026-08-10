@@ -102,8 +102,8 @@ class AnnotationSubmit(BaseModel):
     @field_validator("score")
     @classmethod
     def validate_score(cls, v):
-        if v not in ("C", "R", "N"):
-            raise ValueError("score must be C, R, or N")
+        if v not in ("C", "R", "N", "NA"):
+            raise ValueError("score must be C, R, N, or NA")
         return v
 
     @field_validator("fail_code")
@@ -112,8 +112,6 @@ class AnnotationSubmit(BaseModel):
         score = info.data.get("score")
         if score == "C" and v:
             raise ValueError("C must not have a fail_code")
-        if score in ("R", "N") and not v:
-            raise ValueError("R/N must have a fail_code")
         if v and v not in [f"F{i:02d}" for i in range(1, 12)]:
             raise ValueError("fail_code must be F01-F11")
         return v

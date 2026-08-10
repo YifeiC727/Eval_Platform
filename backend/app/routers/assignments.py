@@ -9,6 +9,30 @@ from app.schemas import AssignmentOut, AssignmentCreate
 router = APIRouter(prefix="/api/assignments", tags=["assignments"])
 
 
+@router.post("/clear")
+def clear_assignments(data: dict = {}, db: Session = Depends(get_db)):
+    """清除所有已分配任务、标注和定案"""
+    project_id = data.get("project_id")
+
+    if project_id:
+        video_ids = [v.id for v in db.query(Video).join(Question).filter(Question.project_id == project_id).all()]
+        finals = db.query(FinalResult).filter(FinalResult.video_id.in_(video_ids)).delete(synchronize_session=False)
+        assignment_ids = [a.id for a in db.query(Assignment).filter(Assignment.video_id.in_(video_ids)).all()]
+        anns = db.query(Annotation).filter(Annotation.assignment_id.in_(assignment_ids)).delete(synchronize_session=False)
+        assignments = db.query(Assignment).filter(Assignment.video_id.in_(video_ids)).delete(synchronize_session=False)
+    else:
+        finals = db.query(FinalResult).delete(synchronize_session=False)
+        anns = db.query(Annotation).delete(synchronize_session=False)
+        assignments = db.query(Assignment).delete(synchronize_session=False)
+
+    db.commit()
+    return {
+        "deleted_assignments": assignments,
+        "deleted_annotations": anns,
+        "deleted_finals": finals,
+    }
+
+
 @router.post("/", response_model=AssignmentOut)
 def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == data.video_id).first()
@@ -50,43 +74,50 @@ def assign_by_mode(data: dict, db: Session = Depends(get_db)):
     mode = data.get("mode", "round_robin")
     project_id = data.get("project_id")
     annotator_ids = data.get("annotator_ids", [])
+    annotation_mode = data.get("annotation_mode", "dual")
 
     if not project_id:
         raise HTTPException(400, "project_id required")
 
     if mode == "round_robin":
-        return _assign_round_robin(db, project_id, annotator_ids)
+        return _assign_round_robin(db, project_id, annotator_ids, annotation_mode)
     elif mode == "manual":
         assignments_list = data.get("assignments", [])
         return _assign_manual(db, assignments_list)
     elif mode == "preview":
-        return _assign_preview(db, project_id, annotator_ids)
+        return _assign_preview(db, project_id, annotator_ids, annotation_mode)
     else:
         raise HTTPException(400, "mode must be round_robin, manual, or preview")
 
 
-def _assign_round_robin(db: Session, project_id: int, annotator_ids: list) -> dict:
-    if len(annotator_ids) < 2:
-        raise HTTPException(400, "need at least 2 annotators")
+def _assign_round_robin(db: Session, project_id: int, annotator_ids: list, annotation_mode: str = "dual") -> dict:
+    min_annotators = 2 if annotation_mode == "dual" else 1
+    if len(annotator_ids) < min_annotators:
+        raise HTTPException(400, f"need at least {min_annotators} annotators")
 
     videos = db.query(Video).join(Question).filter(Question.project_id == project_id).all()
     unassigned = [v for v in videos if db.query(Assignment).filter(Assignment.video_id == v.id).count() == 0]
 
     n = len(annotator_ids)
     created = 0
-    for idx, video in enumerate(unassigned):
-        a_idx = idx % n
-        b_idx = (idx + 1) % n
-        if b_idx == a_idx:
-            b_idx = (idx + 2) % n
 
-        db.add(Assignment(video_id=video.id, annotator_id=annotator_ids[a_idx], role="A"))
-        db.add(Assignment(video_id=video.id, annotator_id=annotator_ids[b_idx], role="B"))
-        created += 2
+    if annotation_mode == "single":
+        for idx, video in enumerate(unassigned):
+            a_idx = idx % n
+            db.add(Assignment(video_id=video.id, annotator_id=annotator_ids[a_idx], role="A"))
+            created += 1
+    else:
+        for idx, video in enumerate(unassigned):
+            a_idx = idx % n
+            b_idx = (idx + 1) % n
+            if b_idx == a_idx:
+                b_idx = (idx + 2) % n
+            db.add(Assignment(video_id=video.id, annotator_id=annotator_ids[a_idx], role="A"))
+            db.add(Assignment(video_id=video.id, annotator_id=annotator_ids[b_idx], role="B"))
+            created += 2
 
     db.commit()
 
-    # Return per-person stats
     per_person = {}
     for aid in annotator_ids:
         count = db.query(Assignment).filter(Assignment.annotator_id == aid).count()
@@ -122,10 +153,11 @@ def _assign_manual(db: Session, assignments_list: list) -> dict:
     return {"created": created, "skipped": skipped}
 
 
-def _assign_preview(db: Session, project_id: int, annotator_ids: list) -> dict:
+def _assign_preview(db: Session, project_id: int, annotator_ids: list, annotation_mode: str = "dual") -> dict:
     """预览均匀轮转结果，不写入数据库"""
-    if len(annotator_ids) < 2:
-        raise HTTPException(400, "need at least 2 annotators")
+    min_annotators = 2 if annotation_mode == "dual" else 1
+    if len(annotator_ids) < min_annotators:
+        raise HTTPException(400, f"need at least {min_annotators} annotators")
 
     videos = db.query(Video).join(Question).filter(Question.project_id == project_id).all()
     unassigned = [v for v in videos if db.query(Assignment).filter(Assignment.video_id == v.id).count() == 0]
@@ -139,32 +171,52 @@ def _assign_preview(db: Session, project_id: int, annotator_ids: list) -> dict:
     preview = []
     per_person = {aid: 0 for aid in annotator_ids}
 
-    for idx, video in enumerate(unassigned):
-        a_idx = idx % n
-        b_idx = (idx + 1) % n
-        if b_idx == a_idx:
-            b_idx = (idx + 2) % n
-
-        a_id = annotator_ids[a_idx]
-        b_id = annotator_ids[b_idx]
-        per_person[a_id] += 1
-        per_person[b_id] += 1
-
-        question = video.question
-        preview.append({
-            "video_id": video.video_id,
-            "question_id": question.question_id if question else "",
-            "prompt_summary": (question.prompt[:60] + "...") if question and len(question.prompt) > 60 else (question.prompt if question else ""),
-            "annotator_a": user_map[a_id],
-            "annotator_b": user_map[b_id],
-        })
+    if annotation_mode == "single":
+        for idx, video in enumerate(unassigned):
+            a_idx = idx % n
+            a_id = annotator_ids[a_idx]
+            per_person[a_id] += 1
+            question = video.question
+            preview.append({
+                "video_id": video.video_id,
+                "video_id_str": video.video_id,
+                "question_id": question.question_id if question else "",
+                "prompt_summary": (question.prompt[:60] + "...") if question and len(question.prompt) > 60 else (question.prompt if question else ""),
+                "annotator_a": user_map[a_id],
+                "annotator_a_name": user_map[a_id],
+                "annotator_b": "-",
+                "annotator_b_name": "-",
+            })
+    else:
+        for idx, video in enumerate(unassigned):
+            a_idx = idx % n
+            b_idx = (idx + 1) % n
+            if b_idx == a_idx:
+                b_idx = (idx + 2) % n
+            a_id = annotator_ids[a_idx]
+            b_id = annotator_ids[b_idx]
+            per_person[a_id] += 1
+            per_person[b_id] += 1
+            question = video.question
+            preview.append({
+                "video_id": video.video_id,
+                "video_id_str": video.video_id,
+                "question_id": question.question_id if question else "",
+                "prompt_summary": (question.prompt[:60] + "...") if question and len(question.prompt) > 60 else (question.prompt if question else ""),
+                "annotator_a": user_map[a_id],
+                "annotator_a_name": user_map[a_id],
+                "annotator_b": user_map[b_id],
+                "annotator_b_name": user_map[b_id],
+            })
 
     per_person_named = {user_map[k]: v for k, v in per_person.items()}
     return {
         "mode": "round_robin",
+        "annotation_mode": annotation_mode,
         "total_to_assign": len(unassigned),
         "per_person": per_person_named,
         "preview": preview[:20],
+        "plan_count": len(preview),
     }
 
 
@@ -174,6 +226,7 @@ def ai_suggest_assignment(data: dict, db: Session = Depends(get_db)):
     project_id = data.get("project_id")
     annotator_ids = data.get("annotator_ids", [])
     instruction = data.get("instruction", "")
+    annotation_mode = data.get("annotation_mode", "dual")
 
     if not project_id or not annotator_ids:
         raise HTTPException(400, "project_id and annotator_ids required")
@@ -201,17 +254,27 @@ def ai_suggest_assignment(data: dict, db: Session = Depends(get_db)):
         # Default: round robin
         for idx, video in enumerate(unassigned):
             a_idx = idx % n
-            b_idx = (idx + 1) % n
-            if b_idx == a_idx:
-                b_idx = (idx + 2) % n
-            plan.append({
-                "video_id": video.id,
-                "video_id_str": video.video_id,
-                "annotator_a_id": annotator_ids[a_idx],
-                "annotator_a_name": users_info[a_idx]["name"] if a_idx < len(users_info) else "",
-                "annotator_b_id": annotator_ids[b_idx],
-                "annotator_b_name": users_info[b_idx]["name"] if b_idx < len(users_info) else "",
-            })
+            if annotation_mode == "single":
+                plan.append({
+                    "video_id": video.id,
+                    "video_id_str": video.video_id,
+                    "annotator_a_id": annotator_ids[a_idx],
+                    "annotator_a_name": users_info[a_idx]["name"] if a_idx < len(users_info) else "",
+                    "annotator_b_id": None,
+                    "annotator_b_name": "-",
+                })
+            else:
+                b_idx = (idx + 1) % n
+                if b_idx == a_idx:
+                    b_idx = (idx + 2) % n
+                plan.append({
+                    "video_id": video.id,
+                    "video_id_str": video.video_id,
+                    "annotator_a_id": annotator_ids[a_idx],
+                    "annotator_a_name": users_info[a_idx]["name"] if a_idx < len(users_info) else "",
+                    "annotator_b_id": annotator_ids[b_idx],
+                    "annotator_b_name": users_info[b_idx]["name"] if b_idx < len(users_info) else "",
+                })
     elif "前" in instruction and "给" in instruction:
         # Pattern: "前100个给ann_01和ann_02"
         import re
@@ -272,7 +335,8 @@ def ai_suggest_assignment(data: dict, db: Session = Depends(get_db)):
         a_name = p["annotator_a_name"]
         b_name = p["annotator_b_name"]
         per_person[a_name] = per_person.get(a_name, 0) + 1
-        per_person[b_name] = per_person.get(b_name, 0) + 1
+        if b_name and b_name != "-":
+            per_person[b_name] = per_person.get(b_name, 0) + 1
 
     return {
         "instruction": instruction,
@@ -298,7 +362,7 @@ def ai_confirm_assignment(data: dict, db: Session = Depends(get_db)):
         a_id = item.get("annotator_a_id")
         b_id = item.get("annotator_b_id")
 
-        if not video_id or not a_id or not b_id:
+        if not video_id or not a_id:
             skipped += 1
             continue
 
@@ -308,8 +372,10 @@ def ai_confirm_assignment(data: dict, db: Session = Depends(get_db)):
             continue
 
         db.add(Assignment(video_id=video_id, annotator_id=a_id, role="A"))
-        db.add(Assignment(video_id=video_id, annotator_id=b_id, role="B"))
-        created += 2
+        created += 1
+        if b_id:
+            db.add(Assignment(video_id=video_id, annotator_id=b_id, role="B"))
+            created += 1
 
     db.commit()
     return {"status": "confirmed", "created": created, "skipped": skipped}
@@ -335,7 +401,7 @@ def get_assignment_progress(project_id: int = None, page: int = 1, page_size: in
 
         finalized_count = db.query(FinalResult).filter(
             FinalResult.video_id == video.id,
-            FinalResult.method.in_(["consensus", "majority", "expert"]),
+            FinalResult.method.in_(["consensus", "majority", "expert", "single"]),
         ).count()
         total_cps = len(question.checkpoints) if question else 0
 

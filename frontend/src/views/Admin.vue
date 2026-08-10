@@ -113,20 +113,40 @@
           </el-table>
           <el-empty v-else description="暂无动态" />
         </el-card>
+
+        <el-card style="margin-top: 16px;">
+          <template #header><span style="font-weight: 600;">项目操作</span></template>
+          <div style="display: flex; gap: 12px;">
+            <el-button type="warning" plain @click="clearAssignments" :disabled="!currentProject">
+              清除任务分配
+            </el-button>
+            <el-button type="danger" plain @click="deleteProject" :disabled="!currentProject">
+              删除当前项目
+            </el-button>
+          </div>
+          <p style="color: #999; font-size: 12px; margin-top: 8px;">
+            清除分配：删除当前项目的所有分配、标注和定案。删除项目：连同题目、检查点、视频一起彻底删除。
+          </p>
+        </el-card>
       </div>
 
       <!-- 任务监控 -->
       <div v-else-if="activeMenu === 'monitor'">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
           <h2>任务监控</h2>
-          <el-select v-model="monitorFilter" placeholder="筛选状态" clearable style="width: 160px;" @change="loadProgress">
-            <el-option label="全部" value="" />
-            <el-option label="未分配" value="未分配" />
-            <el-option label="已分配待标注" value="已分配待标注" />
-            <el-option label="A/B部分提交" value="A/B部分提交" />
-            <el-option label="待第三人" value="待第三人" />
-            <el-option label="已定案" value="已定案" />
-          </el-select>
+          <div style="display: flex; gap: 12px;">
+            <el-select v-model="monitorProject" placeholder="选择项目" style="width: 200px;" @change="loadProgress">
+              <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+            </el-select>
+            <el-select v-model="monitorFilter" placeholder="筛选状态" clearable style="width: 160px;" @change="loadProgress">
+              <el-option label="全部" value="" />
+              <el-option label="未分配" value="未分配" />
+              <el-option label="已分配待标注" value="已分配待标注" />
+              <el-option label="A/B部分提交" value="A/B部分提交" />
+              <el-option label="待第三人" value="待第三人" />
+              <el-option label="已定案" value="已定案" />
+            </el-select>
+          </div>
         </div>
         <el-table :data="filteredProgress" stripe style="width: 100%;" max-height="600">
           <el-table-column prop="video_id" label="视频" width="80" />
@@ -258,12 +278,17 @@
           <el-button size="small" type="primary" @click="showCreateUser = true">添加标注员</el-button>
         </div>
         <el-table :data="annotatorStats" stripe>
-          <el-table-column prop="username" label="用户名" width="120" />
-          <el-table-column prop="display_name" label="姓名" width="100" />
-          <el-table-column prop="total_tasks" label="总任务" width="80" />
-          <el-table-column prop="submitted_tasks" label="已提交" width="80" />
-          <el-table-column prop="pending_tasks" label="待完成" width="80" />
-          <el-table-column prop="total_annotations" label="标注数" width="80" />
+          <el-table-column prop="username" label="用户名" width="100" />
+          <el-table-column prop="display_name" label="姓名" width="80" />
+          <el-table-column prop="password" label="密码" width="120">
+            <template #default="{ row }">
+              <span style="font-family: monospace;">{{ row.password || '-' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="total_tasks" label="总任务" width="70" />
+          <el-table-column prop="submitted_tasks" label="已提交" width="70" />
+          <el-table-column prop="pending_tasks" label="待完成" width="70" />
+          <el-table-column prop="total_annotations" label="标注数" width="70" />
           <el-table-column label="完成率" width="120">
             <template #default="{ row }">
               <el-progress :percentage="row.completion_rate" :stroke-width="12" :text-inside="true" />
@@ -271,7 +296,7 @@
           </el-table-column>
           <el-table-column label="操作" width="120">
             <template #default="{ row }">
-              <el-button size="small" @click="openSetPassword(row)">设置密码</el-button>
+              <el-button size="small" @click="openSetPassword(row)">修改密码</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -280,27 +305,58 @@
       <!-- 数据导入 -->
       <div v-else-if="activeMenu === 'import'">
         <h2 style="margin-bottom: 16px;">数据导入</h2>
+
+        <el-alert type="info" :closable="false" style="margin-bottom: 20px;">
+          <template #title>导入流程</template>
+          <p>第①步：选择或新建项目 → 第②步：上传检查点拆解 Excel → 第③步：点击"开始导入"</p>
+          <p style="margin-top: 4px; color: #666;">支持文件格式：【v6】t2v-10s_检查点拆解_含覆盖统计.xlsx（需包含"原题"和"检查点拆解"两个 sheet）</p>
+        </el-alert>
+
+        <el-steps :active="importStep" align-center style="margin-bottom: 24px;">
+          <el-step title="选择项目" :status="selectedProject ? 'success' : 'process'" />
+          <el-step title="上传文件" :status="selectedFile ? 'success' : (selectedProject ? 'process' : 'wait')" />
+          <el-step title="执行导入" :status="importResult ? 'success' : 'wait'" />
+        </el-steps>
+
         <el-card>
-          <el-form label-position="top">
-            <el-form-item label="项目">
-              <el-select v-model="selectedProject" placeholder="选择项目" style="width: 300px;">
-                <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
-              </el-select>
-              <el-button style="margin-left: 12px;" @click="showCreateProject = true">新建项目</el-button>
-            </el-form-item>
-            <el-form-item label="上传检查点拆解 Excel">
-              <el-upload :auto-upload="false" :limit="1" accept=".xlsx,.xls" :on-change="handleFileChange" drag>
+          <div style="display: flex; flex-direction: column; gap: 24px;">
+            <!-- Step 1: Project -->
+            <div>
+              <h4 style="margin-bottom: 8px;">① 选择项目</h4>
+              <div style="display: flex; gap: 12px; align-items: center;">
+                <el-select v-model="selectedProject" placeholder="选择已有项目" style="width: 300px;">
+                  <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
+                </el-select>
+                <el-button @click="showCreateProject = true">新建项目</el-button>
+              </div>
+            </div>
+
+            <!-- Step 2: Upload -->
+            <div>
+              <h4 style="margin-bottom: 8px;">② 上传检查点拆解 Excel</h4>
+              <el-upload :auto-upload="false" :limit="1" accept=".xlsx,.xls" :on-change="handleFileChange"
+                :disabled="!selectedProject" drag style="width: 100%;">
                 <div style="padding: 20px;">
-                  <p>拖拽或点击上传 .xlsx 文件</p>
-                  <p style="color: #999; font-size: 12px;">支持「检查点拆解」格式</p>
+                  <p style="font-size: 16px;">拖拽或点击选择 .xlsx 文件</p>
+                  <p style="color: #999; font-size: 13px; margin-top: 4px;">文件需包含"原题"和"检查点拆解"两个 sheet</p>
                 </div>
               </el-upload>
-            </el-form-item>
-            <el-button type="primary" @click="doImport" :loading="importing" :disabled="!selectedProject || !selectedFile">
-              开始导入
-            </el-button>
-          </el-form>
-          <el-alert v-if="importResult" :title="importResult" type="success" show-icon style="margin-top: 16px;" />
+              <p v-if="selectedFile" style="margin-top: 8px; color: #67c23a;">已选择: {{ selectedFile.name }}</p>
+            </div>
+
+            <!-- Step 3: Execute -->
+            <div>
+              <h4 style="margin-bottom: 8px;">③ 执行导入</h4>
+              <el-button type="primary" size="large" @click="doImport" :loading="importing"
+                :disabled="!selectedProject || !selectedFile">
+                开始导入
+              </el-button>
+              <span v-if="!selectedProject" style="margin-left: 12px; color: #999; font-size: 13px;">请先选择项目</span>
+              <span v-else-if="!selectedFile" style="margin-left: 12px; color: #999; font-size: 13px;">请先上传文件</span>
+            </div>
+          </div>
+
+          <el-alert v-if="importResult" :title="importResult" type="success" show-icon style="margin-top: 20px;" />
         </el-card>
       </div>
 
@@ -321,6 +377,15 @@
                 <el-radio-button value="manual">手动指派</el-radio-button>
                 <el-radio-button value="ai">AI 智能分配</el-radio-button>
               </el-radio-group>
+            </el-form-item>
+            <el-form-item label="标注模式">
+              <el-radio-group v-model="annotationMode">
+                <el-radio-button value="dual">双人盲标（A/B + 仲裁）</el-radio-button>
+                <el-radio-button value="single">单人标注</el-radio-button>
+              </el-radio-group>
+              <p style="color: #999; font-size: 12px; margin-top: 4px;">
+                {{ annotationMode === 'dual' ? '每个视频分配2人独立标注，不一致时引入第三人仲裁' : '每个视频仅1人标注，不做比对和仲裁，适合快速出结果' }}
+              </p>
             </el-form-item>
 
             <!-- 均匀轮转 -->
@@ -463,7 +528,7 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api.js'
 
 const activeMenu = ref('overview')
@@ -475,6 +540,7 @@ const progressItems = ref([])
 const progressTotal = ref(0)
 const progressPage = ref(1)
 const monitorFilter = ref('')
+const monitorProject = ref(null)
 const searchQuery = ref('')
 const searchAbility = ref('')
 const searchResults = ref([])
@@ -492,6 +558,12 @@ const selectedProject = ref(null)
 const selectedFile = ref(null)
 const importing = ref(false)
 const importResult = ref('')
+const importStep = computed(() => {
+  if (importResult.value) return 3
+  if (selectedFile.value) return 2
+  if (selectedProject.value) return 1
+  return 0
+})
 const showCreateProject = ref(false)
 const showCreateUser = ref(false)
 const showSetPassword = ref(false)
@@ -502,6 +574,7 @@ const newUser = ref({ username: '', display_name: '', password: '' })
 const assignProject = ref(null)
 const assignAnnotators = ref([])
 const assignMode = ref('round_robin')
+const annotationMode = ref('dual')
 const assigning = ref(false)
 const assignResult = ref('')
 const previewing = ref(false)
@@ -597,7 +670,9 @@ async function loadOverview() {
 
 async function loadProgress() {
   try {
-    const { data } = await api.get('/assignments/progress', { params: { page: progressPage.value, page_size: 50 } })
+    const params = { page: progressPage.value, page_size: 50 }
+    if (monitorProject.value) params.project_id = monitorProject.value
+    const { data } = await api.get('/assignments/progress', { params })
     progressItems.value = data.items
     progressTotal.value = data.total
   } catch (e) { console.error(e) }
@@ -615,6 +690,7 @@ async function loadProjects() {
   projects.value = data
   if (data.length && !currentProject.value) {
     currentProject.value = data[0].id
+    monitorProject.value = data[0].id
   }
 }
 
@@ -623,7 +699,7 @@ async function loadUsers() {
   users.value = data
 }
 
-function handleFileChange(file) { selectedFile.value = file.raw }
+function handleFileChange(file) { selectedFile.value = file.raw; selectedFile.value.name = file.name }
 
 async function doImport() {
   if (!selectedFile.value || !selectedProject.value) return
@@ -670,6 +746,7 @@ async function previewAssign() {
       mode: 'preview',
       project_id: assignProject.value,
       annotator_ids: assignAnnotators.value,
+      annotation_mode: annotationMode.value,
     })
     previewData.value = data
   } catch (e) {
@@ -685,6 +762,7 @@ async function doBatchAssign() {
       mode: 'round_robin',
       project_id: assignProject.value,
       annotator_ids: assignAnnotators.value,
+      annotation_mode: annotationMode.value,
     })
     assignResult.value = `分配完成: 创建 ${data.created} 个任务, 覆盖 ${data.videos_assigned} 个视频`
     previewData.value = null
@@ -732,6 +810,7 @@ async function doAiSuggest() {
       project_id: assignProject.value,
       annotator_ids: assignAnnotators.value,
       instruction: aiInstruction.value,
+      annotation_mode: annotationMode.value,
     })
     previewData.value = data
     aiPlan.value = data.plan_full || []
@@ -757,6 +836,37 @@ async function doAiConfirm() {
 
 function doExport() {
   window.open('/api/export/results', '_blank')
+}
+
+async function clearAssignments() {
+  const projectName = projects.value.find(p => p.id === currentProject.value)?.name || ''
+  try {
+    await ElMessageBox.confirm(
+      `将清除项目「${projectName}」下的所有任务分配、标注记录和定案结果。此操作不可撤销。`,
+      '确认清除',
+      { type: 'error', confirmButtonText: '确认清除', cancelButtonText: '取消' }
+    )
+    const { data } = await api.post('/assignments/clear', { project_id: currentProject.value })
+    ElMessage.success(`已清除: ${data.deleted_assignments} 个任务, ${data.deleted_annotations} 条标注, ${data.deleted_finals} 条定案`)
+    loadOverview()
+  } catch {}
+}
+
+async function deleteProject() {
+  const projectName = projects.value.find(p => p.id === currentProject.value)?.name || ''
+  try {
+    await ElMessageBox.confirm(
+      `将彻底删除项目「${projectName}」及其所有题目、检查点、视频、分配和标注数据。此操作不可恢复！`,
+      '删除项目',
+      { type: 'error', confirmButtonText: '确认删除', cancelButtonText: '取消' }
+    )
+    await api.delete(`/projects/${currentProject.value}`)
+    ElMessage.success(`项目「${projectName}」已删除`)
+    currentProject.value = null
+    await loadProjects()
+    if (projects.value.length) currentProject.value = projects.value[0].id
+    loadOverview()
+  } catch {}
 }
 
 function openSetPassword(row) {

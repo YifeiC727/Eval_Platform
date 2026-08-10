@@ -43,6 +43,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, nullable=False)
     password_hash = Column(String(128))
+    password_plain = Column(String(50))
     display_name = Column(String(100))
     role = Column(String(50), default="annotator")
     created_at = Column(DateTime, default=datetime.utcnow)

@@ -5,12 +5,19 @@
         <span>返回任务列表</span>
       </template>
       <template #content>
-        <span style="font-size: 16px; font-weight: 600;">
-          {{ detail?.question?.question_id }} — {{ detail?.assignment?.role === 'third' ? '仲裁任务' : '标注任务' }}
-          <el-tag :type="detail?.assignment?.role === 'third' ? 'warning' : 'primary'" size="small" style="margin-left: 8px;">
-            角色: {{ detail?.assignment?.role }}
-          </el-tag>
-        </span>
+        <div style="display: flex; align-items: center; gap: 16px;">
+          <span style="font-size: 16px; font-weight: 600;">
+            {{ detail?.question?.question_id }} — {{ detail?.assignment?.role === 'third' ? '仲裁任务' : '标注任务' }}
+            <el-tag :type="detail?.assignment?.role === 'third' ? 'warning' : 'primary'" size="small" style="margin-left: 8px;">
+              角色: {{ detail?.assignment?.role }}
+            </el-tag>
+          </span>
+          <div style="display: flex; gap: 8px;">
+            <el-button size="small" :disabled="!hasPrev" @click="goTask('prev')">上一题</el-button>
+            <span style="font-size: 13px; color: #999;">{{ currentTaskIndex + 1 }} / {{ taskIds.length }}</span>
+            <el-button size="small" :disabled="!hasNext" @click="goTask('next')">下一题</el-button>
+          </div>
+        </div>
       </template>
     </el-page-header>
 
@@ -43,6 +50,12 @@
               </span>
             </div>
           </template>
+          <div style="padding: 10px 16px; background: #f0f7ff; border-bottom: 1px solid #e0e0e0; font-size: 12px; color: #555;">
+            <strong>C 达标</strong> = 达到最低成功线 &nbsp;|&nbsp;
+            <strong>R 部分</strong> = 有尝试但未达标 &nbsp;|&nbsp;
+            <strong>N 缺失</strong> = 完全缺失或无关 &nbsp;|&nbsp;
+            <strong>不适用</strong> = 该检查点与视频内容不匹配，不应用于此题（不计入得分）
+          </div>
           <div style="max-height: 600px; overflow-y: auto;">
             <div v-for="(cp, idx) in detail.checkpoints" :key="cp.id"
               :style="{ opacity: cp.is_finalized ? 0.4 : 1, padding: '16px', borderBottom: '1px solid #eee', background: currentIdx === idx ? '#f0f9ff' : '' }"
@@ -63,19 +76,13 @@
                 </div>
                 <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                   <el-radio-group v-model="annotations[cp.id].score" size="large">
-                    <el-radio-button value="C">C</el-radio-button>
-                    <el-radio-button value="R">R</el-radio-button>
-                    <el-radio-button value="N">N</el-radio-button>
+                    <el-radio-button value="C">C 达标</el-radio-button>
+                    <el-radio-button value="R">R 部分</el-radio-button>
+                    <el-radio-button value="N">N 缺失</el-radio-button>
+                    <el-radio-button value="NA">不适用</el-radio-button>
                   </el-radio-group>
-
-                  <el-select v-if="annotations[cp.id].score && annotations[cp.id].score !== 'C'"
-                    v-model="annotations[cp.id].fail_code" placeholder="失败码" size="small" style="width: 200px;">
-                    <el-option v-for="fc in failCodes" :key="fc.code" :label="`${fc.code} ${fc.name}`" :value="fc.code" />
-                  </el-select>
-
-                  <el-input v-model="annotations[cp.id].evidence_ts" placeholder="时间戳" size="small" style="width: 100px;" />
                 </div>
-                <el-input v-model="annotations[cp.id].note" placeholder="备注（可选）" size="small" style="margin-top: 8px;" />
+                <el-input v-model="annotations[cp.id].note" placeholder="备注（可选，如对检查点拆解的建议等）" size="small" style="margin-top: 8px;" />
               </div>
             </div>
           </div>
@@ -83,26 +90,25 @@
 
         <div style="margin-top: 16px; display: flex; gap: 12px; justify-content: space-between;">
           <div style="display: flex; gap: 8px;">
-            <el-button type="danger" plain @click="reportIssue">技术无效上报</el-button>
-            <el-button plain @click="skipTask">跳过此题</el-button>
+            <el-button type="danger" plain @click="reportIssue">技术无效</el-button>
           </div>
           <div style="display: flex; gap: 8px;">
             <el-button @click="saveAnnotations" :loading="saving">暂存</el-button>
-            <el-button type="primary" @click="submitAndLock" :loading="submitting"
+            <el-button type="success" @click="completeAndNext" :loading="submitting"
               :disabled="!canSubmit || detail.assignment.status === 'submitted'">
-              提交锁定
+              完成此题 →
             </el-button>
           </div>
         </div>
-        <el-alert v-if="detail.assignment.status === 'submitted'" type="success" title="已提交锁定，不可修改" show-icon style="margin-top: 12px;" />
-        <el-alert v-if="detail.assignment.status === 'issue_reported'" type="warning" title="已上报技术无效，等待管理员处理" show-icon style="margin-top: 12px;" />
+        <el-alert v-if="detail.assignment.status === 'submitted'" type="success" title="已全部提交锁定，不可修改" show-icon style="margin-top: 12px;" />
+        <el-alert v-if="detail.assignment.status === 'issue_reported'" type="warning" title="已上报技术无效" show-icon style="margin-top: 12px;" />
       </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api.js'
@@ -118,6 +124,14 @@ const detail = ref(null)
 const annotations = reactive({})
 const currentIdx = ref(0)
 const videoEl = ref(null)
+const taskIds = ref([])
+const currentTaskIndex = computed(() => {
+  const id = parseInt(props.assignmentId || route.params.assignmentId)
+  const idx = taskIds.value.indexOf(id)
+  return idx >= 0 ? idx : 0
+})
+const hasPrev = computed(() => currentTaskIndex.value > 0)
+const hasNext = computed(() => currentTaskIndex.value < taskIds.value.length - 1)
 
 const failCodes = [
   { code: 'F01', name: '要求遗漏' },
@@ -139,13 +153,38 @@ const canSubmit = computed(() => {
   return activeCheckpoints.value.every(cp => {
     const ann = annotations[cp.id]
     if (!ann?.score) return false
-    if (ann.score !== 'C' && !ann.fail_code) return false
     return true
   })
 })
 
 onMounted(async () => {
   const id = props.assignmentId || route.params.assignmentId
+  // Load all task IDs for navigation
+  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  if (user.id) {
+    try {
+      const { data: allTasks } = await api.get('/assignments/my', { params: { user_id: user.id } })
+      taskIds.value = allTasks.filter(t => t.status !== 'submitted').map(t => t.id)
+      if (!taskIds.value.includes(parseInt(id))) {
+        taskIds.value = [parseInt(id), ...taskIds.value]
+      }
+    } catch {}
+  }
+  await loadAssignment(id)
+})
+
+function goTask(direction) {
+  const idx = currentTaskIndex.value
+  const nextIdx = direction === 'next' ? idx + 1 : idx - 1
+  if (nextIdx >= 0 && nextIdx < taskIds.value.length) {
+    router.push(`/annotate/${taskIds.value[nextIdx]}`)
+  }
+}
+
+async function loadAssignment(id) {
+  loading.value = true
+  detail.value = null
+  Object.keys(annotations).forEach(k => delete annotations[k])
   try {
     const { data } = await api.get(`/assignments/${id}`)
     detail.value = data
@@ -166,6 +205,10 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+}
+
+watch(() => route.params.assignmentId, (newId) => {
+  if (newId) loadAssignment(newId)
 })
 
 function buildPayload() {
@@ -194,21 +237,22 @@ async function saveAnnotations() {
   }
 }
 
-async function submitAndLock() {
-  try {
-    await ElMessageBox.confirm('提交后将锁定，不可修改。确认提交？', '确认提交', { type: 'warning' })
-  } catch { return }
-
+async function completeAndNext() {
   submitting.value = true
   try {
-    const { data } = await api.post('/annotations/submit-and-lock', buildPayload())
-    ElMessage.success('提交成功，已锁定')
-    detail.value.assignment.status = 'submitted'
-    if (data.comparison) {
-      ElMessage.info(`比对完成: ${data.comparison.consensus} 一致, ${data.comparison.need_third} 需仲裁`)
+    await api.post('/annotations/submit', buildPayload())
+    // Mark as completed (in_progress means annotations saved)
+    await api.post('/annotations/complete', { assignment_id: parseInt(props.assignmentId || route.params.assignmentId) })
+    ElMessage.success('已完成此题')
+    // Go to next task
+    if (hasNext.value) {
+      goTask('next')
+    } else {
+      ElMessage.info('所有任务已完成，返回任务列表')
+      router.push('/tasks')
     }
   } catch (e) {
-    ElMessage.error('提交失败: ' + (e.response?.data?.detail || e.message))
+    ElMessage.error('保存失败: ' + (e.response?.data?.detail || e.message))
   } finally {
     submitting.value = false
   }

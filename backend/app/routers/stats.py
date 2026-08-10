@@ -33,7 +33,7 @@ def get_overview(project_id: int = None, db: Session = Depends(get_db)):
     submitted_count = submitted_assignments.scalar()
 
     finalized_query = db.query(func.count(FinalResult.id)).filter(
-        FinalResult.method.in_(["consensus", "majority", "expert"])
+        FinalResult.method.in_(["consensus", "majority", "expert", "single"])
     )
     pending_third_query = db.query(func.count(FinalResult.id)).filter(FinalResult.method == "pending_third")
     pending_expert_query = db.query(func.count(FinalResult.id)).filter(FinalResult.method == "pending_expert")
@@ -124,6 +124,7 @@ def get_annotator_stats(project_id: int = None, db: Session = Depends(get_db)):
             "id": user.id,
             "username": user.username,
             "display_name": user.display_name,
+            "password": user.password_plain or "",
             "total_tasks": total_tasks,
             "submitted_tasks": submitted_tasks,
             "pending_tasks": pending_tasks,
