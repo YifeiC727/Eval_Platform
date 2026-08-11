@@ -66,11 +66,19 @@ def create_project():
 
 def create_questions_and_checkpoints(db, project_id, count=10):
     """Directly insert test questions and checkpoints"""
-    from app.models import Question, Checkpoint, Video
+    from app.models import Question, Checkpoint, Video, QuestionBank, EvalBatch
+    # Create a bank and batch
+    bank = QuestionBank(name="TestBank")
+    db.add(bank)
+    db.flush()
+    batch = EvalBatch(name="TestBatch", bank_id=bank.id, model_version="v12")
+    db.add(batch)
+    db.flush()
+
     for i in range(1, count + 1):
         q = Question(
             question_id=f"Q{i:04d}",
-            project_id=project_id,
+            bank_id=bank.id,
             prompt=f"Test prompt {i}: A person doing action {i} in environment {i}",
             language="英文",
         )
@@ -79,8 +87,8 @@ def create_questions_and_checkpoints(db, project_id, count=10):
 
         v = Video(
             video_id=f"V{i:04d}",
+            batch_id=batch.id,
             question_id=q.id,
-            model_version="v12",
             oss_url=f"https://example.com/video_{i:04d}.mp4",
             duration_sec=10.0,
         )

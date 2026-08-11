@@ -32,8 +32,9 @@
       <el-table-column prop="created_at" label="创建时间" width="110">
         <template #default="{ row }">{{ row.created_at?.slice(0, 10) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="80">
+      <el-table-column label="操作" width="140">
         <template #default="{ row }">
+          <el-button size="small" type="primary" link @click.stop="emit('select', row)">详情/分配</el-button>
           <el-button size="small" type="danger" link @click.stop="deleteBatch(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -43,9 +44,10 @@
     <el-dialog v-model="showCreate" title="新建评测批次" width="500px">
       <el-form label-position="top">
         <el-form-item label="选择题库">
-          <el-select v-model="newBatch.bank_id" style="width: 100%;">
-            <el-option v-for="b in banks" :key="b.id" :label="`${b.name} (${b.question_count}题, v${b.version})`" :value="b.id" />
+          <el-select v-model="newBatch.bank_id" style="width: 100%;" placeholder="请选择">
+            <el-option v-for="b in bankList" :key="b.id" :label="`${b.name} (${b.question_count}题, v${b.version})`" :value="b.id" />
           </el-select>
+          <p v-if="!bankList.length" style="color: #e6393e; font-size: 12px; margin-top: 4px;">没有题库，请先在"题库管理"中创建并导入</p>
         </el-form-item>
         <el-form-item label="模型版本">
           <el-input v-model="newBatch.model_version" placeholder="如: model_v13" />
@@ -72,7 +74,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../../api.js'
 
@@ -80,10 +82,21 @@ const props = defineProps(['banks'])
 const emit = defineEmits(['select'])
 
 const batchList = ref([])
+const bankList = ref([])
 const showCreate = ref(false)
 const newBatch = ref({ bank_id: null, model_version: '', name: '', annotation_mode: 'single', description: '' })
 
-onMounted(loadBatches)
+onMounted(async () => {
+  await loadBatches()
+  await loadBanks()
+})
+
+watch(() => props.banks, (v) => { if (v && v.length) bankList.value = v }, { immediate: true })
+
+async function loadBanks() {
+  const { data } = await api.get('/banks/')
+  bankList.value = data
+}
 
 async function loadBatches() {
   const { data } = await api.get('/batches/')
@@ -91,6 +104,14 @@ async function loadBatches() {
 }
 
 async function createBatch() {
+  if (!newBatch.value.bank_id) {
+    ElMessage.warning('请选择题库')
+    return
+  }
+  if (!newBatch.value.model_version) {
+    ElMessage.warning('请输入模型版本')
+    return
+  }
   try {
     const { data } = await api.post('/batches/', newBatch.value)
     ElMessage.success(`批次创建成功，已生成 ${data.videos_created} 个视频`)

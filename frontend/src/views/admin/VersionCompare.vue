@@ -5,11 +5,11 @@
     <el-card style="margin-bottom: 20px;">
       <div style="display: flex; gap: 16px; align-items: center;">
         <el-select v-model="batchA" placeholder="选择批次A" style="width: 250px;">
-          <el-option v-for="b in batches" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
+          <el-option v-for="b in batchList" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
         </el-select>
         <span style="font-size: 18px; font-weight: 600;">VS</span>
         <el-select v-model="batchB" placeholder="选择批次B" style="width: 250px;">
-          <el-option v-for="b in batches" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
+          <el-option v-for="b in batchList" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
         </el-select>
         <el-button type="primary" @click="doCompare" :disabled="!batchA || !batchB || batchA === batchB" :loading="loading">
           对比
@@ -54,7 +54,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../../api.js'
 
@@ -64,6 +64,12 @@ const batchA = ref(null)
 const batchB = ref(null)
 const comparison = ref(null)
 const loading = ref(false)
+const batchList = ref([])
+
+onMounted(async () => {
+  const { data } = await api.get('/batches/')
+  batchList.value = data
+})
 
 function deltaRowClass({ row }) {
   if (row.delta > 5) return 'good-row'
