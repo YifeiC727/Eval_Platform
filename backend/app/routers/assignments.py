@@ -415,10 +415,12 @@ def ai_confirm_assignment(data: dict, db: Session = Depends(get_db)):
 
 
 @router.get("/progress")
-def get_assignment_progress(project_id: int = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
+def get_assignment_progress(project_id: int = None, batch_id: int = None, page: int = 1, page_size: int = 50, db: Session = Depends(get_db)):
     query = db.query(Video)
-    if project_id:
-        query = query.join(Question).filter(Question.project_id == project_id)
+    if batch_id:
+        query = query.filter(Video.batch_id == batch_id)
+    elif project_id:
+        query = query.join(Question).filter(Question.bank_id == project_id)
 
     total = query.count()
     videos = query.offset((page - 1) * page_size).limit(page_size).all()

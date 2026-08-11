@@ -36,7 +36,18 @@
       </el-tab-pane>
 
       <el-tab-pane label="进度监控" name="monitor">
-        <el-table :data="progress" stripe max-height="500">
+        <div style="display: flex; gap: 12px; margin-bottom: 12px;">
+          <el-select v-model="filterStatus" placeholder="筛选状态" clearable size="small" style="width: 140px;">
+            <el-option label="未分配" value="未分配" />
+            <el-option label="已分配待标注" value="已分配待标注" />
+            <el-option label="A/B部分提交" value="A/B部分提交" />
+            <el-option label="已定案" value="已定案" />
+          </el-select>
+          <el-select v-model="filterAnnotator" placeholder="筛选标注员" clearable size="small" style="width: 140px;">
+            <el-option v-for="u in annotators" :key="u.id" :label="u.display_name || u.username" :value="u.display_name || u.username" />
+          </el-select>
+        </div>
+        <el-table :data="filteredProgress" stripe max-height="500">
           <el-table-column prop="video_id" label="视频" width="80" />
           <el-table-column prop="question_id" label="题目" width="80" />
           <el-table-column prop="prompt_summary" label="Prompt" min-width="180" show-overflow-tooltip />
@@ -45,8 +56,14 @@
               <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column prop="annotator_a" label="标注员" width="80" />
+          <el-table-column prop="annotator_a" label="A" width="80" />
+          <el-table-column prop="annotator_b" label="B" width="80" />
           <el-table-column prop="finalized" label="定案" width="60" />
+          <el-table-column label="操作" width="80">
+            <template #default="{ row }">
+              <el-button v-if="row.annotator_a" size="small" type="danger" link @click="resetVideo(row)">重置</el-button>
+            </template>
+          </el-table-column>
         </el-table>
       </el-tab-pane>
 
@@ -75,8 +92,8 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ref, computed, watch, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../../api.js'
 
 const props = defineProps(['batch', 'annotators'])
@@ -88,6 +105,15 @@ const assigning = ref(false)
 const assignResult = ref('')
 const progress = ref([])
 const scores = ref([])
+const filterStatus = ref('')
+const filterAnnotator = ref('')
+
+const filteredProgress = computed(() => {
+  let list = progress.value
+  if (filterStatus.value) list = list.filter(p => p.status === filterStatus.value)
+  if (filterAnnotator.value) list = list.filter(p => p.annotator_a === filterAnnotator.value || p.annotator_b === filterAnnotator.value)
+  return list
+})
 
 watch(() => props.batch, (b) => {
   if (b) {
@@ -104,7 +130,7 @@ function statusType(s) {
 async function loadProgress() {
   if (!props.batch) return
   try {
-    const { data } = await api.get('/assignments/progress', { params: { project_id: props.batch.bank_id, page_size: 999 } })
+    const { data } = await api.get('/assignments/progress', { params: { batch_id: props.batch.id, page_size: 999 } })
     progress.value = data.items
   } catch {}
 }
@@ -134,5 +160,14 @@ async function doAssign() {
 
 function doExport() {
   window.open(`/api/export/results?project_id=${props.batch.bank_id}`, '_blank')
+}
+
+async function resetVideo(row) {
+  try {
+    await ElMessageBox.confirm(`重置视频「${row.video_id}」的标注？`, '重置', { type: 'warning' })
+    await api.post('/assignments/reset-single', { video_id: row.video_id })
+    ElMessage.success('已重置')
+    loadProgress()
+  } catch {}
 }
 </script>
