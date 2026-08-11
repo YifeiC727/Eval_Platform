@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine, Base
-from app.routers import projects, import_data, assignments, annotations, arbitration, scores, export, stats, issues, qc
+from app.routers import projects, import_data, assignments, annotations, arbitration, scores, export, stats, issues, qc, banks, batches
 
 Base.metadata.create_all(bind=engine)
 
@@ -28,6 +28,8 @@ app.include_router(export.router)
 app.include_router(stats.router)
 app.include_router(issues.router)
 app.include_router(qc.router)
+app.include_router(banks.router)
+app.include_router(batches.router)
 
 
 @app.get("/api/health")
