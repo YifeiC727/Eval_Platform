@@ -202,6 +202,82 @@ SQLite 文件位于 `backend/data/eval.db`，包含以下表：
 
 ---
 
+## 重新部署 / 更新代码（重要：保护数据库）
+
+### 原则：代码可以随时更新，数据库不能丢
+
+数据库文件是 `backend/data/eval.db`，包含所有用户、项目、标注数据。**更新代码时绝对不能删除或覆盖这个文件。**
+
+### 安全更新步骤
+
+```bash
+# 1. 先备份数据库（必做！）
+cp backend/data/eval.db backend/data/eval_backup_$(date +%Y%m%d_%H%M%S).db
+
+# 2. 拉取最新代码
+git pull origin main
+
+# 3. 安装可能新增的依赖
+cd backend && pip install -r requirements.txt
+cd ../frontend && npm install
+
+# 4. 重启服务
+# 如果用 uvicorn --reload，代码改动会自动生效
+# 如果用 gunicorn，需要手动重启：
+kill $(cat /tmp/eval_platform.pid) 2>/dev/null
+cd backend && gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8001 -D -p /tmp/eval_platform.pid
+```
+
+### 禁止操作
+
+| 操作 | 后果 |
+|------|------|
+| `rm -rf` 整个目录后重新 clone | **丢失所有数据** |
+| `git checkout -- .` 或 `git reset --hard` | 不影响数据库（db 在 .gitignore 里），但如果手动把 db 加进 git 了就会被还原 |
+| 删除 `backend/data/` 目录 | **丢失所有数据** |
+| 修改 `models.py` 中的表结构（如改列名、删列） | 启动时不会自动迁移，旧数据可能读不出来 |
+
+### 数据库迁移（如果改了表结构）
+
+SQLite 不支持 `ALTER TABLE DROP COLUMN`。如果新版本改了数据模型，需要：
+
+```bash
+# 方案 A：导出数据 → 删库 → 重启（自动建新表） → 重新导入
+# 适用于数据可以重新导入的情况
+
+# 方案 B：手动加列（不删旧列）
+cd backend
+python3 -c "
+from app.database import engine
+from sqlalchemy import text
+with engine.connect() as conn:
+    conn.execute(text('ALTER TABLE xxx ADD COLUMN new_col VARCHAR(50)'))
+    conn.commit()
+"
+```
+
+### 定期备份建议
+
+```bash
+# 加入 crontab，每天凌晨备份一次
+0 2 * * * cp /path/to/backend/data/eval.db /path/to/backups/eval_$(date +\%Y\%m\%d).db
+```
+
+### 恢复备份
+
+```bash
+# 停止服务
+kill $(cat /tmp/eval_platform.pid)
+
+# 用备份替换
+cp /path/to/backups/eval_20260811.db backend/data/eval.db
+
+# 重启
+cd backend && gunicorn app.main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8001 -D -p /tmp/eval_platform.pid
+```
+
+---
+
 ## 注意事项
 
 1. SQLite 适合 20 人以下并发。如需更高并发，改 `backend/app/database.py` 中的 `DATABASE_URL` 为 MySQL/PostgreSQL
