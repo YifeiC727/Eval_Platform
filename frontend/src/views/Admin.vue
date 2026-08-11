@@ -801,17 +801,25 @@ async function deleteUser(row) {
 }
 
 async function resetUserTasks(row) {
+  const projectOptions = projects.value.map(p => p.name).join(' / ')
   try {
-    const { value: action } = await ElMessageBox({
-      title: `重置「${row.display_name}」的任务`,
-      message: '选择重置范围：',
-      showInput: false,
-      distinguishCancelAndClose: true,
-      confirmButtonText: '重置当前项目全部任务',
-      cancelButtonText: '取消',
-    })
-    await api.post(`/users/${row.id}/reset-tasks`, { project_id: currentProject.value })
-    ElMessage.success('任务已重置，对应视频变为未分配状态')
+    const { value: selectedName } = await ElMessageBox.prompt(
+      `选择要重置的项目（该标注员在该项目的所有任务将被释放）：`,
+      `重置「${row.display_name}」的任务`,
+      {
+        inputValue: projects.value.find(p => p.id === currentProject.value)?.name || '',
+        confirmButtonText: '确认重置',
+        cancelButtonText: '取消',
+        inputPlaceholder: '输入项目名称',
+        inputValidator: (val) => {
+          return projects.value.some(p => p.name === val) || '请输入正确的项目名称'
+        },
+      }
+    )
+    const project = projects.value.find(p => p.name === selectedName)
+    if (!project) return
+    await api.post(`/users/${row.id}/reset-tasks`, { project_id: project.id })
+    ElMessage.success(`已重置「${row.display_name}」在「${selectedName}」中的任务`)
     await loadAnnotatorStats()
   } catch {}
 }
