@@ -66,6 +66,38 @@ def reset_single_assignment(data: dict, db: Session = Depends(get_db)):
     return {"status": "reset", "deleted_assignments": deleted, "video_id": video_id_str}
 
 
+@router.post("/reset-single-by-annotator")
+def reset_by_annotator_in_batch(data: dict, db: Session = Depends(get_db)):
+    """移除某标注员在某批次中的所有任务"""
+    batch_id = data.get("batch_id")
+    annotator_name = data.get("annotator_name")
+
+    if not batch_id or not annotator_name:
+        raise HTTPException(400, "batch_id and annotator_name required")
+
+    user = db.query(User).filter(
+        (User.display_name == annotator_name) | (User.username == annotator_name)
+    ).first()
+    if not user:
+        raise HTTPException(404, "annotator not found")
+
+    video_ids = [v.id for v in db.query(Video).filter(Video.batch_id == batch_id).all()]
+    assignments = db.query(Assignment).filter(
+        Assignment.video_id.in_(video_ids),
+        Assignment.annotator_id == user.id,
+    ).all()
+
+    deleted = 0
+    for a in assignments:
+        db.query(Annotation).filter(Annotation.assignment_id == a.id).delete(synchronize_session=False)
+        db.query(FinalResult).filter(FinalResult.video_id == a.video_id).delete(synchronize_session=False)
+        db.delete(a)
+        deleted += 1
+
+    db.commit()
+    return {"status": "removed", "deleted": deleted, "annotator": annotator_name}
+
+
 @router.post("/", response_model=AssignmentOut)
 def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == data.video_id).first()

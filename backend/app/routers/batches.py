@@ -138,6 +138,45 @@ def delete_batch(batch_id: int, db: Session = Depends(get_db)):
     return {"status": "deleted"}
 
 
+@router.post("/{batch_id}/assign-preview")
+def preview_batch_assignment(batch_id: int, data: dict, db: Session = Depends(get_db)):
+    """预览分配结果（不写入）"""
+    batch = db.query(EvalBatch).filter(EvalBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(404, "batch not found")
+
+    annotator_ids = data.get("annotator_ids", [])
+    annotation_mode = data.get("annotation_mode", batch.annotation_mode)
+
+    videos = db.query(Video).filter(Video.batch_id == batch_id).all()
+    unassigned = [v for v in videos if db.query(Assignment).filter(Assignment.video_id == v.id).count() == 0]
+
+    n = len(annotator_ids)
+    if n == 0:
+        return {"total_to_assign": len(unassigned), "per_person": {}}
+
+    user_map = {}
+    for aid in annotator_ids:
+        user = db.query(User).filter(User.id == aid).first()
+        user_map[aid] = user.display_name or user.username if user else str(aid)
+
+    per_person = {aid: 0 for aid in annotator_ids}
+    if annotation_mode == "single":
+        for idx, v in enumerate(unassigned):
+            per_person[annotator_ids[idx % n]] += 1
+    else:
+        for idx, v in enumerate(unassigned):
+            a_idx = idx % n
+            b_idx = (idx + 1) % n
+            if b_idx == a_idx:
+                b_idx = (idx + 2) % n
+            per_person[annotator_ids[a_idx]] += 1
+            per_person[annotator_ids[b_idx]] += 1
+
+    per_person_named = {user_map[k]: v for k, v in per_person.items()}
+    return {"total_to_assign": len(unassigned), "per_person": per_person_named}
+
+
 @router.post("/{batch_id}/update-urls")
 def update_video_urls(batch_id: int, data: dict, db: Session = Depends(get_db)):
     """批量更新视频URL: {"urls": {"Q0001": "http://...", "Q0002": "http://..."}}"""
@@ -167,8 +206,13 @@ def assign_batch(batch_id: int, data: dict, db: Session = Depends(get_db)):
         raise HTTPException(404, "batch not found")
 
     annotator_ids = data.get("annotator_ids", [])
+    annotation_mode = data.get("annotation_mode", batch.annotation_mode)
     if not annotator_ids:
         raise HTTPException(400, "annotator_ids required")
+
+    # Update batch annotation_mode if changed
+    if annotation_mode != batch.annotation_mode:
+        batch.annotation_mode = annotation_mode
 
     videos = db.query(Video).filter(Video.batch_id == batch_id).all()
     unassigned = [v for v in videos if db.query(Assignment).filter(Assignment.video_id == v.id).count() == 0]
@@ -176,7 +220,7 @@ def assign_batch(batch_id: int, data: dict, db: Session = Depends(get_db)):
     n = len(annotator_ids)
     created = 0
 
-    if batch.annotation_mode == "single":
+    if annotation_mode == "single":
         if n < 1:
             raise HTTPException(400, "need at least 1 annotator")
         for idx, video in enumerate(unassigned):
