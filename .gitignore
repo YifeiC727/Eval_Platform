@@ -1,10 +1,10 @@
 __pycache__/
 *.pyc
 *.db
-backend/data/uploads/
 backend/data/eval.db
+backend/test.db
+backend/.pytest_cache/
 frontend/node_modules/
 frontend/dist/
 .DS_Store
 *.log
-test.db

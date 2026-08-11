@@ -11,6 +11,8 @@ def import_checkpoints_xlsx(db: Session, file_path: str, project_id: int) -> dic
 
     if "原题" in wb.sheetnames:
         ws = wb["原题"]
+        header = [str(c.value or "").strip() for c in next(ws.iter_rows(min_row=1, max_row=1))]
+        url_col = header.index("视频URL") if "视频URL" in header else -1
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         for row in rows:
             if not row[0]:
@@ -30,6 +32,15 @@ def import_checkpoints_xlsx(db: Session, file_path: str, project_id: int) -> dic
             db.add(q)
             stats["questions"] += 1
         db.flush()
+
+        # Build URL map from 原题 sheet
+        url_map = {}
+        if url_col >= 0:
+            for row in rows:
+                if row[0] and len(row) > url_col and row[url_col]:
+                    url_map[str(row[0]).strip()] = str(row[url_col]).strip()
+    else:
+        url_map = {}
 
     if "检查点拆解" in wb.sheetnames:
         ws = wb["检查点拆解"]
@@ -81,7 +92,7 @@ def import_checkpoints_xlsx(db: Session, file_path: str, project_id: int) -> dic
                 video_id=f"V{seq}",
                 question_id=q.id,
                 model_version=db.query(Project).filter(Project.id == project_id).first().model_version,
-                oss_url="",
+                oss_url=url_map.get(q.question_id, ""),
                 duration_sec=10.0,
             )
             db.add(v)
