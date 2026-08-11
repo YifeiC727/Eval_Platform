@@ -238,33 +238,38 @@
           </el-table-column>
         </el-table>
 
-        <!-- A/B 对比详情 -->
-        <el-dialog v-model="showComparison" :title="`A/B 对比 — ${comparisonData?.video_id}`" width="90%" top="5vh">
+        <!-- 标注详情 -->
+        <el-dialog v-model="showComparison" :title="`标注详情 — ${comparisonData?.video_id} ${comparisonData?.question_id}`" width="90%" top="5vh">
           <div v-if="comparisonData">
-            <div style="display: flex; gap: 16px; margin-bottom: 16px; align-items: center;">
-              <el-tag>一致: {{ comparisonData.agree_count }}</el-tag>
-              <el-tag type="danger">分歧: {{ comparisonData.disagree_count }}</el-tag>
-              <span style="color: #666;">A: {{ comparisonData.annotator_a }} | B: {{ comparisonData.annotator_b }}</span>
+            <div style="display: flex; gap: 16px; margin-bottom: 16px; align-items: center; flex-wrap: wrap;">
+              <el-tag v-if="comparisonData.annotator_a">标注员A: {{ comparisonData.annotator_a }}</el-tag>
+              <el-tag v-if="comparisonData.annotator_b" type="success">标注员B: {{ comparisonData.annotator_b }}</el-tag>
+              <el-tag v-if="comparisonData.annotator_third" type="warning">第三人: {{ comparisonData.annotator_third }}</el-tag>
+              <el-tag v-if="comparisonData.annotator_b" :type="comparisonData.disagree_count > 0 ? 'danger' : 'success'">
+                一致: {{ comparisonData.agree_count }} | 分歧: {{ comparisonData.disagree_count }}
+              </el-tag>
+              <el-tag type="info">只读模式</el-tag>
             </div>
-            <div style="background: #f8fafc; padding: 12px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; line-height: 1.7;">
+            <div style="background: #f8fafc; padding: 12px; border-radius: 6px; margin-bottom: 16px; font-size: 14px; line-height: 1.7; white-space: pre-wrap;">
               {{ comparisonData.prompt }}
             </div>
             <el-table :data="comparisonData.comparison" stripe size="small" :row-class-name="compRowClass">
               <el-table-column prop="checkpoint_id" label="检查点" width="110" />
-              <el-table-column prop="text" label="要求" min-width="200" show-overflow-tooltip />
-              <el-table-column label="A判定" width="80">
+              <el-table-column prop="text" label="要求" min-width="180" show-overflow-tooltip />
+              <el-table-column prop="min_success_line" label="最低成功线" min-width="150" show-overflow-tooltip />
+              <el-table-column label="A判定" width="70">
                 <template #default="{ row }">
                   <span :style="{ color: scoreColor(row.a_score), fontWeight: 600 }">{{ row.a_score || '-' }}</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="a_fail_code" label="A失败码" width="80" />
-              <el-table-column label="B判定" width="80">
+              <el-table-column prop="a_note" label="A备注" width="120" show-overflow-tooltip v-if="comparisonData.comparison.some(r => r.a_note)" />
+              <el-table-column label="B判定" width="70" v-if="comparisonData.annotator_b">
                 <template #default="{ row }">
                   <span :style="{ color: scoreColor(row.b_score), fontWeight: 600 }">{{ row.b_score || '-' }}</span>
                 </template>
               </el-table-column>
-              <el-table-column prop="b_fail_code" label="B失败码" width="80" />
-              <el-table-column label="第三人" width="70">
+              <el-table-column prop="b_note" label="B备注" width="120" show-overflow-tooltip v-if="comparisonData.annotator_b && comparisonData.comparison.some(r => r.b_note)" />
+              <el-table-column label="第三人" width="70" v-if="comparisonData.annotator_third">
                 <template #default="{ row }">{{ row.third_score || '-' }}</template>
               </el-table-column>
               <el-table-column label="定案" width="70">
@@ -272,7 +277,7 @@
                   <strong>{{ row.final_score || '-' }}</strong>
                 </template>
               </el-table-column>
-              <el-table-column label="一致" width="60">
+              <el-table-column label="一致" width="60" v-if="comparisonData.annotator_b">
                 <template #default="{ row }">
                   <span v-if="row.is_agree" style="color: #67c23a;">Y</span>
                   <span v-else-if="row.a_score && row.b_score" style="color: #e6393e; font-weight: 600;">N</span>
