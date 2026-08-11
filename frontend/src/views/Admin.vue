@@ -169,9 +169,10 @@
           <el-table-column prop="annotator_b" label="B" width="80" />
           <el-table-column prop="annotator_third" label="第三人" width="80" />
           <el-table-column prop="finalized" label="定案数" width="70" />
-          <el-table-column label="操作" width="100">
+          <el-table-column label="操作" width="150">
             <template #default="{ row }">
-              <el-button size="small" type="primary" link @click="viewComparison(row.video_id)">查看详情</el-button>
+              <el-button size="small" type="primary" link @click="viewComparison(row.video_id)">详情</el-button>
+              <el-button size="small" type="danger" link @click="resetSingleTask(row)">重置</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -287,7 +288,7 @@
       <div v-else-if="activeMenu === 'annotators'">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
           <h2>标注员工作量</h2>
-          <el-button size="small" type="primary" @click="showCreateUser = true">添加标注员</el-button>
+          <el-button size="small" type="primary" @click="showCreateUser = true">添加用户</el-button>
         </div>
         <el-table :data="annotatorStats" stripe>
           <el-table-column prop="username" label="用户名" width="100" />
@@ -306,9 +307,12 @@
               <el-progress :percentage="row.completion_rate" :stroke-width="12" :text-inside="true" />
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="120">
+          <el-table-column label="操作" width="280">
             <template #default="{ row }">
-              <el-button size="small" @click="openSetPassword(row)">修改密码</el-button>
+              <el-button size="small" @click="openEditUser(row)">编辑</el-button>
+              <el-button size="small" @click="openSetPassword(row)">密码</el-button>
+              <el-button size="small" type="warning" @click="resetUserTasks(row)">重置任务</el-button>
+              <el-button size="small" type="danger" @click="deleteUser(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -516,11 +520,19 @@
     </template>
   </el-dialog>
 
-  <el-dialog v-model="showCreateUser" title="添加标注员" width="400px">
+  <el-dialog v-model="showCreateUser" title="添加用户" width="400px">
     <el-form label-position="top">
       <el-form-item label="ERP工号（登录名）"><el-input v-model="newUser.username" /></el-form-item>
       <el-form-item label="姓名"><el-input v-model="newUser.display_name" /></el-form-item>
-      <el-form-item label="登录密码"><el-input v-model="newUser.password" type="password" show-password placeholder="至少4位" /></el-form-item>
+      <el-form-item label="角色">
+        <el-select v-model="newUser.role" style="width: 100%;">
+          <el-option label="标注员" value="annotator" />
+          <el-option label="组长" value="lead" />
+          <el-option label="管理员" value="admin" />
+          <el-option label="管理员+标注员" value="admin,annotator" />
+        </el-select>
+      </el-form-item>
+      <el-form-item label="登录密码（可选）"><el-input v-model="newUser.password" type="password" show-password placeholder="不填则无需密码" /></el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="showCreateUser = false">取消</el-button>
@@ -534,6 +546,25 @@
     <template #footer>
       <el-button @click="showSetPassword = false">取消</el-button>
       <el-button type="primary" @click="doSetPassword">确认设置</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog v-model="showEditUser" title="编辑用户" width="400px">
+    <el-form label-position="top">
+      <el-form-item label="用户名"><el-input v-model="editUserData.username" /></el-form-item>
+      <el-form-item label="姓名"><el-input v-model="editUserData.display_name" /></el-form-item>
+      <el-form-item label="角色">
+        <el-select v-model="editUserData.role" style="width: 100%;">
+          <el-option label="标注员" value="annotator" />
+          <el-option label="组长" value="lead" />
+          <el-option label="管理员" value="admin" />
+          <el-option label="管理员+标注员" value="admin,annotator" />
+        </el-select>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="showEditUser = false">取消</el-button>
+      <el-button type="primary" @click="doEditUser">保存</el-button>
     </template>
   </el-dialog>
 </template>
@@ -580,10 +611,12 @@ const importStep = computed(() => {
 const showCreateProject = ref(false)
 const showCreateUser = ref(false)
 const showSetPassword = ref(false)
+const showEditUser = ref(false)
+const editUserData = ref({ id: null, username: '', display_name: '', role: '' })
 const setPasswordUser = ref(null)
 const setPasswordValue = ref('')
 const newProject = ref({ project_id: '', name: '', model_version: '' })
-const newUser = ref({ username: '', display_name: '', password: '' })
+const newUser = ref({ username: '', display_name: '', password: '', role: 'annotator' })
 const assignProject = ref(null)
 const assignAnnotators = ref([])
 const assignMode = ref('round_robin')
@@ -748,13 +781,39 @@ async function createProject() {
 
 async function createUser() {
   try {
-    await api.post('/users/', { username: newUser.value.username, display_name: newUser.value.display_name, password: newUser.value.password || null, role: 'annotator' })
+    await api.post('/users/', { username: newUser.value.username, display_name: newUser.value.display_name, password: newUser.value.password || null, role: newUser.value.role })
     ElMessage.success('创建成功')
     showCreateUser.value = false
-    newUser.value = { username: '', display_name: '', password: '' }
+    newUser.value = { username: '', display_name: '', password: '', role: 'annotator' }
     await loadUsers()
     await loadAnnotatorStats()
   } catch (e) { ElMessage.error(e.response?.data?.detail || '创建失败') }
+}
+
+async function deleteUser(row) {
+  try {
+    await ElMessageBox.confirm(`确认删除用户「${row.display_name || row.username}」？其所有任务和标注记录也将被删除。`, '删除用户', { type: 'error' })
+    await api.delete(`/users/${row.id}`)
+    ElMessage.success('已删除')
+    await loadUsers()
+    await loadAnnotatorStats()
+  } catch {}
+}
+
+async function resetUserTasks(row) {
+  try {
+    const { value: action } = await ElMessageBox({
+      title: `重置「${row.display_name}」的任务`,
+      message: '选择重置范围：',
+      showInput: false,
+      distinguishCancelAndClose: true,
+      confirmButtonText: '重置当前项目全部任务',
+      cancelButtonText: '取消',
+    })
+    await api.post(`/users/${row.id}/reset-tasks`, { project_id: currentProject.value })
+    ElMessage.success('任务已重置，对应视频变为未分配状态')
+    await loadAnnotatorStats()
+  } catch {}
 }
 
 async function previewAssign() {
@@ -903,8 +962,42 @@ async function doSetPassword() {
     await api.put(`/users/${setPasswordUser.value.id}/password`, { password: setPasswordValue.value })
     ElMessage.success('密码设置成功')
     showSetPassword.value = false
+    await loadAnnotatorStats()
   } catch (e) {
     ElMessage.error(e.response?.data?.detail || '设置失败')
   }
+}
+
+function openEditUser(row) {
+  editUserData.value = { id: row.id, username: row.username, display_name: row.display_name || '', role: '' }
+  showEditUser.value = true
+}
+
+async function doEditUser() {
+  try {
+    await api.put(`/users/${editUserData.value.id}`, {
+      username: editUserData.value.username,
+      display_name: editUserData.value.display_name,
+      role: editUserData.value.role || undefined,
+    })
+    ElMessage.success('保存成功')
+    showEditUser.value = false
+    await loadUsers()
+    await loadAnnotatorStats()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.detail || '保存失败')
+  }
+}
+
+async function resetSingleTask(row) {
+  try {
+    await ElMessageBox.confirm(
+      `重置视频「${row.video_id}」的标注？将删除该题的分配、标注和定案，视频变为未分配状态。`,
+      '重置单题', { type: 'warning' }
+    )
+    await api.post('/assignments/reset-single', { video_id: row.video_id, annotator: row.annotator_a })
+    ElMessage.success('已重置')
+    loadProgress()
+  } catch {}
 }
 </script>

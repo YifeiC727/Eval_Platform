@@ -33,6 +33,39 @@ def clear_assignments(data: dict = {}, db: Session = Depends(get_db)):
     }
 
 
+@router.post("/reset-single")
+def reset_single_assignment(data: dict, db: Session = Depends(get_db)):
+    """重置单道题的标注（按 video_id + annotator）"""
+    video_id_str = data.get("video_id")
+    annotator_name = data.get("annotator")
+
+    if not video_id_str:
+        raise HTTPException(400, "video_id required")
+
+    video = db.query(Video).filter(Video.video_id == video_id_str).first()
+    if not video:
+        raise HTTPException(404, "video not found")
+
+    query = db.query(Assignment).filter(Assignment.video_id == video.id)
+    if annotator_name:
+        user = db.query(User).filter(
+            (User.display_name == annotator_name) | (User.username == annotator_name)
+        ).first()
+        if user:
+            query = query.filter(Assignment.annotator_id == user.id)
+
+    assignments = query.all()
+    deleted = 0
+    for a in assignments:
+        db.query(Annotation).filter(Annotation.assignment_id == a.id).delete(synchronize_session=False)
+        db.query(FinalResult).filter(FinalResult.video_id == video.id).delete(synchronize_session=False)
+        db.delete(a)
+        deleted += 1
+
+    db.commit()
+    return {"status": "reset", "deleted_assignments": deleted, "video_id": video_id_str}
+
+
 @router.post("/", response_model=AssignmentOut)
 def create_assignment(data: AssignmentCreate, db: Session = Depends(get_db)):
     video = db.query(Video).filter(Video.id == data.video_id).first()

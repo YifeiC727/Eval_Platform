@@ -130,9 +130,82 @@ def set_password(user_id: int, data: dict, db: Session = Depends(get_db)):
     return {"status": "ok"}
 
 
+@users_router.put("/{user_id}")
+def update_user(user_id: int, data: dict, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "user not found")
+    if "username" in data and data["username"]:
+        existing = db.query(User).filter(User.username == data["username"], User.id != user_id).first()
+        if existing:
+            raise HTTPException(400, "用户名已存在")
+        user.username = data["username"]
+    if "display_name" in data:
+        user.display_name = data["display_name"]
+    if "role" in data and data["role"]:
+        user.role = data["role"]
+    db.commit()
+    return {"status": "ok"}
+
+
 @users_router.get("/{user_id}/password")
 def get_password(user_id: int, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(404, "user not found")
     return {"password": user.password_plain or "(未设置)"}
+
+
+@users_router.delete("/{user_id}")
+def delete_user(user_id: int, db: Session = Depends(get_db)):
+    from app.models import Assignment, Annotation
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "user not found")
+    # Delete related assignments and annotations
+    assignment_ids = [a.id for a in db.query(Assignment).filter(Assignment.annotator_id == user_id).all()]
+    if assignment_ids:
+        db.query(Annotation).filter(Annotation.assignment_id.in_(assignment_ids)).delete(synchronize_session=False)
+    db.query(Assignment).filter(Assignment.annotator_id == user_id).delete(synchronize_session=False)
+    db.delete(user)
+    db.commit()
+    return {"status": "deleted", "username": user.username}
+
+
+@users_router.post("/{user_id}/reset-tasks")
+def reset_user_tasks(user_id: int, data: dict = {}, db: Session = Depends(get_db)):
+    """重置某个标注员在某项目中的任务（删除其分配和标注，视频变回未分配）"""
+    from app.models import Assignment, Annotation, FinalResult, Video, Question
+    project_id = data.get("project_id")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(404, "user not found")
+
+    query = db.query(Assignment).filter(Assignment.annotator_id == user_id)
+    if project_id:
+        video_ids_in_project = [v.id for v in db.query(Video).join(Question).filter(Question.project_id == project_id).all()]
+        query = query.filter(Assignment.video_id.in_(video_ids_in_project))
+
+    assignments = query.all()
+    deleted_assignments = 0
+    deleted_annotations = 0
+    deleted_finals = 0
+
+    for a in assignments:
+        # Delete annotations
+        ann_count = db.query(Annotation).filter(Annotation.assignment_id == a.id).delete(synchronize_session=False)
+        deleted_annotations += ann_count
+        # Delete finals for this video+role (only if single mode or this was the only annotator)
+        fr_count = db.query(FinalResult).filter(FinalResult.video_id == a.video_id).delete(synchronize_session=False)
+        deleted_finals += fr_count
+        db.delete(a)
+        deleted_assignments += 1
+
+    db.commit()
+    return {
+        "status": "reset",
+        "username": user.display_name or user.username,
+        "deleted_assignments": deleted_assignments,
+        "deleted_annotations": deleted_annotations,
+        "deleted_finals": deleted_finals,
+    }
