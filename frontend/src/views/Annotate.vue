@@ -82,6 +82,15 @@
                     <el-radio-button value="NA">不适用</el-radio-button>
                   </el-radio-group>
                 </div>
+                <!-- 失败码选择 (score != C 且 fail_code_mode != disabled) -->
+                <div v-if="annotations[cp.id].score && annotations[cp.id].score !== 'C' && annotations[cp.id].score !== 'NA' && failCodeMode !== 'disabled'"
+                  style="margin-top: 8px;">
+                  <el-select v-model="annotations[cp.id].fail_code"
+                    :placeholder="failCodeMode === 'required' ? '请选择失败码（必填）' : '选择失败码（可选）'"
+                    size="small" style="width: 280px;" clearable>
+                    <el-option v-for="fc in failCodes" :key="fc.code" :label="fc.code + ' ' + fc.name" :value="fc.code" />
+                  </el-select>
+                </div>
                 <el-input v-model="annotations[cp.id].note" placeholder="备注（可选，如对检查点拆解的建议等）" size="small" style="margin-top: 8px;" />
               </div>
             </div>
@@ -90,7 +99,10 @@
 
         <div style="margin-top: 16px; display: flex; gap: 12px; justify-content: space-between;">
           <div style="display: flex; gap: 8px;">
-            <el-button type="danger" plain @click="reportIssue">技术无效</el-button>
+            <el-button v-if="detail.assignment.role === 'expert'" type="danger" @click="dropAsExpert">
+              确认技术无效(废弃此题)
+            </el-button>
+            <el-button v-else type="danger" plain @click="reportIssue">技术无效</el-button>
           </div>
           <div style="display: flex; gap: 8px;">
             <el-button @click="saveAnnotations" :loading="saving">暂存</el-button>
@@ -149,10 +161,13 @@ const failCodes = [
 
 const activeCheckpoints = computed(() => detail.value?.checkpoints?.filter(cp => cp.needs_annotation) || [])
 const annotatedCount = computed(() => activeCheckpoints.value.filter(cp => annotations[cp.id]?.score).length)
+const failCodeMode = computed(() => detail.value?.batch?.fail_code_mode || 'optional')
 const canSubmit = computed(() => {
   return activeCheckpoints.value.every(cp => {
     const ann = annotations[cp.id]
     if (!ann?.score) return false
+    // If fail_code_mode is required and score is R/N, must have fail_code
+    if (failCodeMode.value === 'required' && (ann.score === 'R' || ann.score === 'N') && !ann.fail_code) return false
     return true
   })
 })
@@ -160,7 +175,7 @@ const canSubmit = computed(() => {
 onMounted(async () => {
   const id = props.assignmentId || route.params.assignmentId
   // Load all task IDs for navigation
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  const user = JSON.parse(sessionStorage.getItem('user') || '{}')
   if (user.id) {
     try {
       const { data: allTasks } = await api.get('/assignments/my', { params: { user_id: user.id } })
@@ -273,6 +288,20 @@ async function reportIssue() {
     })
     ElMessage.success('已上报，等待管理员处理')
     detail.value.assignment.status = 'issue_reported'
+  } catch {}
+}
+
+async function dropAsExpert() {
+  try {
+    await ElMessageBox.confirm(
+      '确认此视频存在技术问题需要废弃？废弃后该题不计入任何统计。',
+      '确认技术无效',
+      { type: 'error', confirmButtonText: '确认废弃', cancelButtonText: '取消' }
+    )
+    const videoId = detail.value.video.id
+    await api.post(`/issues/drop/${videoId}`)
+    ElMessage.success('已废弃，该题不计入统计')
+    router.push('/admin')
   } catch {}
 }
 

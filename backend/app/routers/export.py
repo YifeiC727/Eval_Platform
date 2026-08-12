@@ -16,6 +16,7 @@ FAIL_CODE_NAMES = {
     "F04": "结构/解剖错误", "F05": "动作动态错误", "F06": "交互/接触错误",
     "F07": "物理/因果错误", "F08": "时序错误", "F09": "一致性错误",
     "F10": "镜头/构图错误", "F11": "视觉呈现错误",
+    "F010": "镜头/构图错误", "F011": "视觉呈现错误",
 }
 
 
@@ -90,7 +91,7 @@ def export_my_annotations(user_id: int = None, db: Session = Depends(get_db)):
 
 
 @router.get("/results")
-def export_results(project_id: int = None, db: Session = Depends(get_db)):
+def export_results(project_id: int = None, batch_id: int = None, db: Session = Depends(get_db)):
     wb = Workbook()
 
     # ========== Sheet 1: 30项能力得分 ==========
@@ -103,8 +104,12 @@ def export_results(project_id: int = None, db: Session = Depends(get_db)):
     query = db.query(Checkpoint, FinalResult).join(
         FinalResult, FinalResult.checkpoint_id == Checkpoint.id
     ).filter(FinalResult.final_score.in_(["C", "R", "N"]))
-    if project_id:
-        query = query.join(Question, Checkpoint.question_id == Question.id).filter(Question.project_id == project_id)
+    if batch_id:
+        query = query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+    elif project_id:
+        query = query.join(Question, Checkpoint.question_id == Question.id).filter(
+            (Question.project_id == project_id) | (Question.bank_id == project_id)
+        )
 
     ability_data = defaultdict(lambda: {"name": "", "scores": [], "c": 0, "r": 0, "n": 0, "fail_codes": [], "tags": []})
     for cp, fr in query.all():
@@ -163,10 +168,18 @@ def export_results(project_id: int = None, db: Session = Depends(get_db)):
     ws3.append(["标签ID", "标签名称", "能力ID", "得分", "C数", "R数", "N数", "有效n"])
     _style_header(ws3)
 
-    tag_data = defaultdict(lambda: {"name": "", "ability": "", "scores": [], "c": 0, "r": 0, "n": 0})
-    for cp, fr in db.query(Checkpoint, FinalResult).join(
+    tag_query = db.query(Checkpoint, FinalResult).join(
         FinalResult, FinalResult.checkpoint_id == Checkpoint.id
-    ).filter(FinalResult.final_score.in_(["C", "R", "N"])).all():
+    ).filter(FinalResult.final_score.in_(["C", "R", "N"]))
+    if batch_id:
+        tag_query = tag_query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+    elif project_id:
+        tag_query = tag_query.join(Question, Checkpoint.question_id == Question.id).filter(
+            (Question.project_id == project_id) | (Question.bank_id == project_id)
+        )
+
+    tag_data = defaultdict(lambda: {"name": "", "ability": "", "scores": [], "c": 0, "r": 0, "n": 0})
+    for cp, fr in tag_query.all():
         tid = cp.tag_id or "UNKNOWN"
         tag_data[tid]["name"] = cp.tag_name or ""
         tag_data[tid]["ability"] = cp.ability_id or ""
@@ -195,11 +208,19 @@ def export_results(project_id: int = None, db: Session = Depends(get_db)):
 
     annotators = db.query(User).filter(User.role.contains("annotator")).all()
     for user in annotators:
-        assignments = db.query(Assignment).filter(Assignment.annotator_id == user.id).all()
+        assign_query = db.query(Assignment).filter(Assignment.annotator_id == user.id)
+        if batch_id:
+            assign_query = assign_query.join(Video, Assignment.video_id == Video.id).filter(Video.batch_id == batch_id)
+
+        assignments = assign_query.all()
         total_tasks = len(assignments)
+        if total_tasks == 0:
+            continue
         submitted = sum(1 for a in assignments if a.status == "submitted")
 
-        anns = db.query(Annotation).join(Assignment).filter(Assignment.annotator_id == user.id).all()
+        # Get annotations for this user's assignments in scope
+        assign_ids = [a.id for a in assignments]
+        anns = db.query(Annotation).filter(Annotation.assignment_id.in_(assign_ids)).all() if assign_ids else []
         c_count = sum(1 for a in anns if a.score == "C")
         r_count = sum(1 for a in anns if a.score == "R")
         n_count = sum(1 for a in anns if a.score == "N")
@@ -221,8 +242,11 @@ def export_results(project_id: int = None, db: Session = Depends(get_db)):
     _style_header(ws5)
 
     questions = db.query(Question)
-    if project_id:
-        questions = questions.filter(Question.project_id == project_id)
+    if batch_id:
+        q_ids = [v.question_id for v in db.query(Video).filter(Video.batch_id == batch_id).all()]
+        questions = questions.filter(Question.id.in_(q_ids))
+    elif project_id:
+        questions = questions.filter((Question.project_id == project_id) | (Question.bank_id == project_id))
 
     for q in questions.all():
         cps = q.checkpoints
@@ -230,7 +254,10 @@ def export_results(project_id: int = None, db: Session = Depends(get_db)):
         q_c = q_r = q_n = 0
         fail_abilities = []
         for cp in cps:
-            fr = db.query(FinalResult).filter(FinalResult.checkpoint_id == cp.id).first()
+            fr_query = db.query(FinalResult).filter(FinalResult.checkpoint_id == cp.id)
+            if batch_id:
+                fr_query = fr_query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+            fr = fr_query.first()
             if fr and fr.final_score in ("C", "R", "N"):
                 q_scores.append(SCORE_MAP[fr.final_score])
                 if fr.final_score == "C":
@@ -260,8 +287,12 @@ def export_results(project_id: int = None, db: Session = Depends(get_db)):
     _style_header(ws6)
 
     fr_query = db.query(FinalResult).join(Checkpoint, FinalResult.checkpoint_id == Checkpoint.id)
-    if project_id:
-        fr_query = fr_query.join(Question, Checkpoint.question_id == Question.id).filter(Question.project_id == project_id)
+    if batch_id:
+        fr_query = fr_query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+    elif project_id:
+        fr_query = fr_query.join(Question, Checkpoint.question_id == Question.id).filter(
+            (Question.project_id == project_id) | (Question.bank_id == project_id)
+        )
 
     for fr in fr_query.all():
         cp = fr.checkpoint
@@ -286,10 +317,12 @@ def export_results(project_id: int = None, db: Session = Depends(get_db)):
     _style_header(ws7)
 
     ann_query = db.query(Annotation).join(Assignment, Annotation.assignment_id == Assignment.id)
-    if project_id:
+    if batch_id:
+        ann_query = ann_query.join(Video, Assignment.video_id == Video.id).filter(Video.batch_id == batch_id)
+    elif project_id:
         ann_query = ann_query.join(Video, Assignment.video_id == Video.id).join(
             Question, Video.question_id == Question.id
-        ).filter(Question.project_id == project_id)
+        ).filter((Question.project_id == project_id) | (Question.bank_id == project_id))
 
     for ann in ann_query.all():
         asgn = ann.assignment

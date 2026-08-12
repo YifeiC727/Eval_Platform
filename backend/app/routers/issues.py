@@ -19,13 +19,41 @@ def report_issue(data: dict, db: Session = Depends(get_db)):
     if not assignment:
         raise HTTPException(404, "assignment not found")
 
-    from app.models import Base
-    from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
-    # Store in a simple way - add to assignment note or create issue record
-    # For now, mark the assignment status and store the issue
     assignment.status = "issue_reported"
-
     db.commit()
+
+    # Check if this triggers downstream logic
+    video_id = assignment.video_id
+    a_assign = db.query(Assignment).filter(Assignment.video_id == video_id, Assignment.role == "A").first()
+    b_assign = db.query(Assignment).filter(Assignment.video_id == video_id, Assignment.role == "B").first()
+    third_assign = db.query(Assignment).filter(Assignment.video_id == video_id, Assignment.role == "third").first()
+
+    # If reporter is A/B and the other side is done → finalize
+    if assignment.role in ("A", "B"):
+        other = b_assign if assignment.role == "A" else a_assign
+        if other and other.status == "submitted":
+            # Other submitted normally → use other's annotations as final
+            anns = db.query(Annotation).filter(Annotation.assignment_id == other.id).all()
+            for ann in anns:
+                existing = db.query(FinalResult).filter(
+                    FinalResult.video_id == video_id, FinalResult.checkpoint_id == ann.checkpoint_id).first()
+                if not existing:
+                    db.add(FinalResult(
+                        video_id=video_id, checkpoint_id=ann.checkpoint_id,
+                        final_score=ann.score, final_fail_code=ann.fail_code, method="single"))
+            db.commit()
+        elif other and other.status == "issue_reported":
+            # Both A/B invalid → third sees all (activation handled by /my visibility)
+            pass
+
+    # If reporter is third → assign expert
+    if assignment.role == "third":
+        existing_expert = db.query(Assignment).filter(
+            Assignment.video_id == video_id, Assignment.role == "expert").first()
+        if not existing_expert:
+            db.add(Assignment(video_id=video_id, annotator_id=1, role="expert"))
+            db.commit()
+
     return {
         "status": "reported",
         "message": f"已上报: {issue_type} - {description}",
@@ -71,3 +99,37 @@ def resolve_issue(assignment_id: int, data: dict, db: Session = Depends(get_db))
         assignment.status = "pending"
     db.commit()
     return {"status": "resolved", "action": action}
+
+
+@router.post("/drop/{video_db_id}")
+def drop_video(video_db_id: int, db: Session = Depends(get_db)):
+    """管理员确认视频技术无效，整题废弃不计入统计"""
+    from app.models import Video as VideoModel
+    video = db.query(VideoModel).filter(VideoModel.id == video_db_id).first()
+    if not video:
+        raise HTTPException(404, "video not found")
+
+    question = video.question
+    checkpoints = db.query(Checkpoint).filter(Checkpoint.question_id == question.id).all()
+
+    # Remove any existing FinalResults for this video
+    db.query(FinalResult).filter(FinalResult.video_id == video_db_id).delete(synchronize_session=False)
+
+    # Create "dropped" FinalResults for all checkpoints
+    for cp in checkpoints:
+        db.add(FinalResult(
+            video_id=video_db_id,
+            checkpoint_id=cp.id,
+            final_score="X",
+            method="dropped",
+        ))
+
+    # Mark expert assignment as done (if exists)
+    expert = db.query(Assignment).filter(
+        Assignment.video_id == video_db_id, Assignment.role == "expert"
+    ).first()
+    if expert:
+        expert.status = "submitted"
+
+    db.commit()
+    return {"status": "dropped", "checkpoints": len(checkpoints)}

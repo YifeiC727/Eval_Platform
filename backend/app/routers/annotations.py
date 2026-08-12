@@ -59,57 +59,255 @@ def complete_assignment(data: dict, db: Session = Depends(get_db)):
 
 @router.post("/submit-all")
 def submit_all(data: dict, db: Session = Depends(get_db)):
-    """全部提交锁定：要求所有任务要么已完成要么技术无效"""
+    """全部提交锁定：要求所有任务要么已完成要么技术无效。支持按批次锁定。"""
     user_id = data.get("user_id")
+    batch_id = data.get("batch_id")
     if not user_id:
         raise HTTPException(400, "user_id required")
 
-    assignments = db.query(Assignment).filter(Assignment.annotator_id == user_id).all()
+    from app.models import Video, FinalResult
+    from app.services.comparator import compare_and_adjudicate, get_disagreed_checkpoints
 
-    incomplete = []
+    query = db.query(Assignment).filter(Assignment.annotator_id == user_id)
+    if batch_id:
+        query = query.join(Video, Assignment.video_id == Video.id).filter(Video.batch_id == batch_id)
+
+    assignments = query.all()
+
+    # Split into groups
+    ab_assignments = [a for a in assignments if a.role in ("A", "B")]
+    third_assignments = []
     for a in assignments:
-        if a.status not in ("completed", "submitted", "issue_reported", "invalidated"):
-            video = a.video
-            question = video.question if video else None
-            incomplete.append(question.question_id if question else f"V{a.video_id}")
+        if a.role == "third" and a.status != "submitted":
+            a_assign = db.query(Assignment).filter(
+                Assignment.video_id == a.video_id, Assignment.role == "A"
+            ).first()
+            b_assign = db.query(Assignment).filter(
+                Assignment.video_id == a.video_id, Assignment.role == "B"
+            ).first()
+            both_done = (
+                a_assign and a_assign.status in ("submitted", "issue_reported")
+                and b_assign and b_assign.status in ("submitted", "issue_reported")
+            )
+            if not both_done:
+                continue
+            # Check if A/B are "invalid" by checking if they have annotations
+            a_has_anns = db.query(Annotation).filter(Annotation.assignment_id == a_assign.id).count() > 0
+            b_has_anns = db.query(Annotation).filter(Annotation.assignment_id == b_assign.id).count() > 0
+            any_invalid = (not a_has_anns or not b_has_anns)
+            if any_invalid or get_disagreed_checkpoints(db, a.video_id):
+                third_assignments.append(a)
+        elif a.role == "third" and a.status == "submitted":
+            third_assignments.append(a)
+    expert_assignments = [a for a in assignments if a.role == "expert"]
 
-    if incomplete:
-        raise HTTPException(400, f"还有 {len(incomplete)} 题未完成: {', '.join(incomplete[:5])}{'...' if len(incomplete) > 5 else ''}")
+    # Determine which group to submit
+    # Default: lock all completed assignments (A/B + visible third + expert)
+    visible_assignments = ab_assignments + third_assignments + expert_assignments
+
+    # No strict validation: just lock whatever is "completed", skip the rest
 
     locked = 0
-    for a in assignments:
-        if a.status == "completed":
+    for a in visible_assignments:
+        if a.status in ("completed", "issue_reported"):
+            was_invalid = (a.status == "issue_reported")
             a.status = "submitted"
             a.submitted_at = datetime.utcnow()
             locked += 1
+            db.flush()
 
-            # Trigger finalization logic
-            other = db.query(Assignment).filter(
-                Assignment.video_id == a.video_id,
-                Assignment.role != a.role,
-                Assignment.role.in_(["A", "B"]),
-            ).first()
+            # Skip downstream logic for issue_reported (already handled by /issues/report)
+            if was_invalid:
+                continue
 
-            if other and other.status == "submitted":
-                from app.services.comparator import compare_and_adjudicate
-                compare_and_adjudicate(db, a.video_id)
-            elif not other:
-                # Single mode: directly finalize
-                from app.models import FinalResult
+            if a.role in ("A", "B"):
+                other = db.query(Assignment).filter(
+                    Assignment.video_id == a.video_id,
+                    Assignment.role != a.role,
+                    Assignment.role.in_(["A", "B"]),
+                ).first()
+
+                if other and other.status in ("submitted", "issue_reported"):
+                    # Check if other actually has annotations (vs was issue_reported)
+                    other_has_anns = db.query(Annotation).filter(Annotation.assignment_id == other.id).count() > 0
+                    if not other_has_anns:
+                        # Other was invalid: use current person's annotations as final
+                        my_anns = db.query(Annotation).filter(Annotation.assignment_id == a.id).all()
+                        for ann in my_anns:
+                            existing = db.query(FinalResult).filter(
+                                FinalResult.video_id == a.video_id, FinalResult.checkpoint_id == ann.checkpoint_id).first()
+                            if not existing:
+                                db.add(FinalResult(video_id=a.video_id, checkpoint_id=ann.checkpoint_id,
+                                    final_score=ann.score, final_fail_code=ann.fail_code, method="single"))
+                    elif other.status == "submitted":
+                        result = compare_and_adjudicate(db, a.video_id)
+                        if result.get("need_third", 0) > 0:
+                            existing_third = db.query(Assignment).filter(
+                                Assignment.video_id == a.video_id, Assignment.role == "third").first()
+                            if not existing_third:
+                                from app.routers.arbitration import assign_third_person
+                                assign_third_person(a.video_id, db)
+                elif not other:
+                    anns = db.query(Annotation).filter(Annotation.assignment_id == a.id).all()
+                    for ann in anns:
+                        existing = db.query(FinalResult).filter(
+                            FinalResult.video_id == a.video_id,
+                            FinalResult.checkpoint_id == ann.checkpoint_id,
+                        ).first()
+                        if not existing:
+                            db.add(FinalResult(
+                                video_id=a.video_id,
+                                checkpoint_id=ann.checkpoint_id,
+                                final_score=ann.score,
+                                final_fail_code=ann.fail_code,
+                                method="single",
+                            ))
+
+            elif a.role == "third":
+                # Check if A/B both invalid (no annotations) → use third's answer directly
+                a_ab = db.query(Assignment).filter(Assignment.video_id == a.video_id, Assignment.role == "A").first()
+                b_ab = db.query(Assignment).filter(Assignment.video_id == a.video_id, Assignment.role == "B").first()
+                a_has = db.query(Annotation).filter(Annotation.assignment_id == a_ab.id).count() > 0 if a_ab else False
+                b_has = db.query(Annotation).filter(Annotation.assignment_id == b_ab.id).count() > 0 if b_ab else False
+                both_invalid = (not a_has and not b_has)
+                if both_invalid:
+                    # Directly finalize with third's annotations
+                    my_anns = db.query(Annotation).filter(Annotation.assignment_id == a.id).all()
+                    for ann in my_anns:
+                        existing = db.query(FinalResult).filter(
+                            FinalResult.video_id == a.video_id, FinalResult.checkpoint_id == ann.checkpoint_id
+                        ).first()
+                        if not existing:
+                            db.add(FinalResult(
+                                video_id=a.video_id, checkpoint_id=ann.checkpoint_id,
+                                final_score=ann.score, final_fail_code=ann.fail_code, method="single"))
+                else:
+                    from app.services.comparator import resolve_with_third
+                    resolve_with_third(db, a.video_id)
+
+            elif a.role == "expert":
                 anns = db.query(Annotation).filter(Annotation.assignment_id == a.id).all()
                 for ann in anns:
-                    existing = db.query(FinalResult).filter(
+                    fr = db.query(FinalResult).filter(
                         FinalResult.video_id == a.video_id,
                         FinalResult.checkpoint_id == ann.checkpoint_id,
+                        FinalResult.method == "pending_expert",
                     ).first()
-                    if not existing:
-                        db.add(FinalResult(
-                            video_id=a.video_id,
-                            checkpoint_id=ann.checkpoint_id,
-                            final_score=ann.score,
-                            final_fail_code=ann.fail_code,
-                            method="single",
-                        ))
+                    if fr:
+                        fr.final_score = ann.score
+                        fr.final_fail_code = ann.fail_code
+                        fr.method = "expert"
+
+    db.commit()
+
+    # Post-commit: run compare + resolve for any videos that now have both A/B (or third) submitted
+    # This handles the case where A and B are submitted by different users in separate requests
+    from app.models import Video
+    if batch_id:
+        video_ids = [v.id for v in db.query(Video).filter(Video.batch_id == batch_id).all()]
+    else:
+        video_ids = list({a.video_id for a in visible_assignments})
+
+    for vid in video_ids:
+        existing_finals = db.query(FinalResult).filter(FinalResult.video_id == vid).count()
+        if existing_finals > 0:
+            # Already has results, check if third needs resolution
+            third_assign = db.query(Assignment).filter(
+                Assignment.video_id == vid, Assignment.role == "third", Assignment.status == "submitted").first()
+            if third_assign:
+                from app.models import Checkpoint
+                video_obj = db.query(Video).filter(Video.id == vid).first()
+                total_cps = db.query(Checkpoint).filter(Checkpoint.question_id == video_obj.question_id).count()
+                finalized = db.query(FinalResult).filter(
+                    FinalResult.video_id == vid, FinalResult.method.in_(["consensus", "majority", "expert", "single", "dropped"])).count()
+                if finalized < total_cps:
+                    from app.services.comparator import resolve_with_third as _resolve
+                    _resolve(db, vid)
+            continue
+
+        # No results yet - determine what to do
+        a_assign = db.query(Assignment).filter(Assignment.video_id == vid, Assignment.role == "A").first()
+        b_assign = db.query(Assignment).filter(Assignment.video_id == vid, Assignment.role == "B").first()
+        if not a_assign or not b_assign:
+            continue
+
+        a_done = a_assign.status in ("submitted", "issue_reported")
+        b_done = b_assign.status in ("submitted", "issue_reported")
+        if not (a_done and b_done):
+            continue
+
+        # Determine if A/B are "truly submitted" or "was invalid" by checking annotations
+        a_has_anns = db.query(Annotation).filter(Annotation.assignment_id == a_assign.id).count() > 0
+        b_has_anns = db.query(Annotation).filter(Annotation.assignment_id == b_assign.id).count() > 0
+
+        if a_has_anns and not b_has_anns:
+            # B was invalid, use A's annotations
+            anns = db.query(Annotation).filter(Annotation.assignment_id == a_assign.id).all()
+            for ann in anns:
+                existing = db.query(FinalResult).filter(FinalResult.video_id == vid, FinalResult.checkpoint_id == ann.checkpoint_id).first()
+                if not existing:
+                    db.add(FinalResult(video_id=vid, checkpoint_id=ann.checkpoint_id,
+                        final_score=ann.score, final_fail_code=ann.fail_code, method="single"))
+        elif b_has_anns and not a_has_anns:
+            # A was invalid, use B's annotations
+            anns = db.query(Annotation).filter(Annotation.assignment_id == b_assign.id).all()
+            for ann in anns:
+                existing = db.query(FinalResult).filter(FinalResult.video_id == vid, FinalResult.checkpoint_id == ann.checkpoint_id).first()
+                if not existing:
+                    db.add(FinalResult(video_id=vid, checkpoint_id=ann.checkpoint_id,
+                        final_score=ann.score, final_fail_code=ann.fail_code, method="single"))
+        elif not a_has_anns and not b_has_anns:
+            # Both invalid → check third
+            third_assign = db.query(Assignment).filter(
+                Assignment.video_id == vid, Assignment.role == "third", Assignment.status == "submitted").first()
+            if third_assign:
+                third_has_anns = db.query(Annotation).filter(Annotation.assignment_id == third_assign.id).count() > 0
+                if third_has_anns:
+                    anns = db.query(Annotation).filter(Annotation.assignment_id == third_assign.id).all()
+                    for ann in anns:
+                        existing = db.query(FinalResult).filter(FinalResult.video_id == vid, FinalResult.checkpoint_id == ann.checkpoint_id).first()
+                        if not existing:
+                            db.add(FinalResult(video_id=vid, checkpoint_id=ann.checkpoint_id,
+                                final_score=ann.score, final_fail_code=ann.fail_code, method="single"))
+                else:
+                    # Third also invalid → assign expert
+                    existing_expert = db.query(Assignment).filter(Assignment.video_id == vid, Assignment.role == "expert").first()
+                    if not existing_expert:
+                        db.add(Assignment(video_id=vid, annotator_id=1, role="expert"))
+        elif a_has_anns and b_has_anns:
+            # Both normal → run compare
+            compare_result = compare_and_adjudicate(db, vid)
+            if compare_result.get("need_third", 0) > 0:
+                existing_third = db.query(Assignment).filter(Assignment.video_id == vid, Assignment.role == "third").first()
+                if not existing_third:
+                    from app.routers.arbitration import assign_third_person
+                    assign_third_person(vid, db)
+            # Handle third invalid after compare
+            third_assign = db.query(Assignment).filter(
+                Assignment.video_id == vid, Assignment.role == "third", Assignment.status == "submitted").first()
+            if third_assign:
+                third_has_anns = db.query(Annotation).filter(Annotation.assignment_id == third_assign.id).count() > 0
+                if not third_has_anns:
+                    existing_expert = db.query(Assignment).filter(Assignment.video_id == vid, Assignment.role == "expert").first()
+                    if not existing_expert:
+                        db.add(Assignment(video_id=vid, annotator_id=1, role="expert"))
+                    if not existing_expert:
+                        db.add(Assignment(video_id=vid, annotator_id=1, role="expert"))
+        elif a_assign.status == "submitted" and b_assign.status == "submitted":
+            # Both submitted → run compare
+            compare_result = compare_and_adjudicate(db, vid)
+            if compare_result.get("need_third", 0) > 0:
+                existing_third = db.query(Assignment).filter(Assignment.video_id == vid, Assignment.role == "third").first()
+                if not existing_third:
+                    from app.routers.arbitration import assign_third_person
+                    assign_third_person(vid, db)
+            # Handle third issue_reported after normal A/B compare
+            third_invalid = db.query(Assignment).filter(
+                Assignment.video_id == vid, Assignment.role == "third", Assignment.status == "issue_reported").first()
+            if third_invalid:
+                existing_expert = db.query(Assignment).filter(Assignment.video_id == vid, Assignment.role == "expert").first()
+                if not existing_expert:
+                    db.add(Assignment(video_id=vid, annotator_id=1, role="expert"))
 
     db.commit()
     return {"status": "locked", "locked_count": locked}
@@ -160,6 +358,15 @@ def submit_and_lock(data: BatchAnnotationSubmit, db: Session = Depends(get_db)):
             # Dual mode: both submitted, run comparison
             compare_result = compare_and_adjudicate(db, assignment.video_id)
             result["comparison"] = compare_result
+            # Auto-assign third if disagreements found and no third exists
+            if compare_result.get("need_third", 0) > 0:
+                existing_third = db.query(Assignment).filter(
+                    Assignment.video_id == assignment.video_id,
+                    Assignment.role == "third",
+                ).first()
+                if not existing_third:
+                    from app.routers.arbitration import assign_third_person
+                    assign_third_person(assignment.video_id, db)
         elif not other:
             # Single mode: no B assigned, directly finalize
             from app.models import FinalResult
@@ -190,6 +397,24 @@ def submit_and_lock(data: BatchAnnotationSubmit, db: Session = Depends(get_db)):
         resolve_result = resolve_with_third(db, assignment.video_id)
         result["resolution"] = resolve_result
 
+    if assignment.role == "expert":
+        from app.models import FinalResult
+        anns = db.query(Annotation).filter(Annotation.assignment_id == assignment.id).all()
+        resolved = 0
+        for ann in anns:
+            fr = db.query(FinalResult).filter(
+                FinalResult.video_id == assignment.video_id,
+                FinalResult.checkpoint_id == ann.checkpoint_id,
+                FinalResult.method == "pending_expert",
+            ).first()
+            if fr:
+                fr.final_score = ann.score
+                fr.final_fail_code = ann.fail_code
+                fr.method = "expert"
+                resolved += 1
+        db.commit()
+        result["expert_resolved"] = resolved
+
     return result
 
 
@@ -207,3 +432,66 @@ def get_annotations(assignment_id: int, db: Session = Depends(get_db)):
         }
         for a in anns
     ]
+
+
+@router.get("/compare-view/{video_db_id}")
+def compare_view(video_db_id: int, db: Session = Depends(get_db)):
+    """管理员查看某视频所有角色的标注对比"""
+    from app.models import Video, Checkpoint, FinalResult
+
+    video = db.query(Video).filter(Video.id == video_db_id).first()
+    if not video:
+        raise HTTPException(404, "video not found")
+
+    question = video.question
+    checkpoints = db.query(Checkpoint).filter(
+        Checkpoint.question_id == question.id
+    ).order_by(Checkpoint.seq).all()
+
+    assignments = db.query(Assignment).filter(Assignment.video_id == video.id).all()
+    role_map = {}
+    for a in assignments:
+        user = a.annotator
+        anns = {ann.checkpoint_id: ann for ann in a.annotations}
+        role_map[a.role] = {
+            "annotator": user.display_name if user else "",
+            "status": a.status,
+            "annotations": anns,
+        }
+
+    finals = {f.checkpoint_id: f for f in db.query(FinalResult).filter(FinalResult.video_id == video.id).all()}
+
+    rows = []
+    for cp in checkpoints:
+        row = {
+            "checkpoint_id": cp.checkpoint_id,
+            "text": cp.text,
+            "ability_name": cp.ability_name or "",
+            "A": None,
+            "B": None,
+            "third": None,
+            "expert": None,
+            "final_score": None,
+            "final_method": None,
+        }
+        for role in ("A", "B", "third", "expert"):
+            if role in role_map:
+                ann = role_map[role]["annotations"].get(cp.id)
+                if ann:
+                    row[role] = {"score": ann.score, "fail_code": ann.fail_code, "note": ann.note}
+
+        fr = finals.get(cp.id)
+        if fr:
+            row["final_score"] = fr.final_score
+            row["final_method"] = fr.method
+
+        rows.append(row)
+
+    return {
+        "video_id": video.video_id,
+        "video_url": video.oss_url or "",
+        "question_id": question.question_id,
+        "prompt": question.prompt,
+        "roles": {role: {"annotator": info["annotator"], "status": info["status"]} for role, info in role_map.items()},
+        "checkpoints": rows,
+    }

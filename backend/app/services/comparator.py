@@ -144,6 +144,7 @@ def resolve_with_third(db: Session, video_id: int) -> dict:
             db.add(final)
             stats["majority"] += 1
         else:
+            # All three disagree: assign to admin (expert) for final decision
             final = FinalResult(
                 video_id=video_id,
                 checkpoint_id=cp.id,
@@ -152,6 +153,19 @@ def resolve_with_third(db: Session, video_id: int) -> dict:
             )
             db.add(final)
             stats["need_expert"] += 1
+
+    # If any need expert, auto-assign expert role to admin (user_id=1)
+    if stats["need_expert"] > 0:
+        existing_expert = db.query(Assignment).filter(
+            Assignment.video_id == video_id,
+            Assignment.role == "expert",
+        ).first()
+        if not existing_expert:
+            db.add(Assignment(
+                video_id=video_id,
+                annotator_id=1,  # 陈逸菲 (admin)
+                role="expert",
+            ))
 
     db.commit()
     return stats

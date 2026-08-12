@@ -35,7 +35,7 @@ def clear_assignments(data: dict = {}, db: Session = Depends(get_db)):
 
 @router.post("/reset-single")
 def reset_single_assignment(data: dict, db: Session = Depends(get_db)):
-    """重置单道题的标注（按 video_id + annotator）"""
+    """重置单道题的标注。若重置A/B则级联清除third/expert和FinalResult。"""
     video_id_str = data.get("video_id")
     annotator_name = data.get("annotator")
 
@@ -56,11 +56,43 @@ def reset_single_assignment(data: dict, db: Session = Depends(get_db)):
 
     assignments = query.all()
     deleted = 0
+
+    # Check if any A/B is being reset → cascade
+    has_ab_reset = any(a.role in ("A", "B") for a in assignments)
+    has_third_reset = any(a.role == "third" for a in assignments)
+
     for a in assignments:
         db.query(Annotation).filter(Annotation.assignment_id == a.id).delete(synchronize_session=False)
-        db.query(FinalResult).filter(FinalResult.video_id == video.id).delete(synchronize_session=False)
         db.delete(a)
         deleted += 1
+
+    # Cascade: if A/B reset, also remove third + expert + all FinalResults
+    if has_ab_reset:
+        downstream = db.query(Assignment).filter(
+            Assignment.video_id == video.id,
+            Assignment.role.in_(["third", "expert"]),
+        ).all()
+        for d in downstream:
+            db.query(Annotation).filter(Annotation.assignment_id == d.id).delete(synchronize_session=False)
+            db.delete(d)
+            deleted += 1
+        db.query(FinalResult).filter(FinalResult.video_id == video.id).delete(synchronize_session=False)
+    elif has_third_reset:
+        # Remove expert + pending_expert FinalResults
+        expert_assigns = db.query(Assignment).filter(
+            Assignment.video_id == video.id, Assignment.role == "expert"
+        ).all()
+        for e in expert_assigns:
+            db.query(Annotation).filter(Annotation.assignment_id == e.id).delete(synchronize_session=False)
+            db.delete(e)
+            deleted += 1
+        db.query(FinalResult).filter(
+            FinalResult.video_id == video.id,
+            FinalResult.method.in_(["pending_expert", "expert", "majority"]),
+        ).delete(synchronize_session=False)
+    else:
+        # Resetting expert only: remove its FinalResults
+        db.query(FinalResult).filter(FinalResult.video_id == video.id).delete(synchronize_session=False)
 
     db.commit()
     return {"status": "reset", "deleted_assignments": deleted, "video_id": video_id_str}
@@ -68,7 +100,7 @@ def reset_single_assignment(data: dict, db: Session = Depends(get_db)):
 
 @router.post("/reset-single-by-annotator")
 def reset_by_annotator_in_batch(data: dict, db: Session = Depends(get_db)):
-    """移除某标注员在某批次中的所有任务"""
+    """移除某标注员在某批次中的所有任务。如果移除的是A/B，级联清除该视频的third/expert和FinalResult。"""
     batch_id = data.get("batch_id")
     annotator_name = data.get("annotator_name")
 
@@ -88,14 +120,38 @@ def reset_by_annotator_in_batch(data: dict, db: Session = Depends(get_db)):
     ).all()
 
     deleted = 0
+    cascade_deleted = 0
     for a in assignments:
         db.query(Annotation).filter(Annotation.assignment_id == a.id).delete(synchronize_session=False)
         db.query(FinalResult).filter(FinalResult.video_id == a.video_id).delete(synchronize_session=False)
+
+        # If removing A or B, cascade delete third and expert for this video
+        if a.role in ("A", "B"):
+            downstream = db.query(Assignment).filter(
+                Assignment.video_id == a.video_id,
+                Assignment.role.in_(["third", "expert"]),
+            ).all()
+            for d in downstream:
+                db.query(Annotation).filter(Annotation.assignment_id == d.id).delete(synchronize_session=False)
+                db.delete(d)
+                cascade_deleted += 1
+
+        # If removing third, cascade delete expert for this video
+        if a.role == "third":
+            expert_assigns = db.query(Assignment).filter(
+                Assignment.video_id == a.video_id,
+                Assignment.role == "expert",
+            ).all()
+            for e in expert_assigns:
+                db.query(Annotation).filter(Annotation.assignment_id == e.id).delete(synchronize_session=False)
+                db.delete(e)
+                cascade_deleted += 1
+
         db.delete(a)
         deleted += 1
 
     db.commit()
-    return {"status": "removed", "deleted": deleted, "annotator": annotator_name}
+    return {"status": "removed", "deleted": deleted, "cascade_deleted": cascade_deleted, "annotator": annotator_name}
 
 
 @router.post("/", response_model=AssignmentOut)
@@ -457,6 +513,8 @@ def get_assignment_progress(project_id: int = None, batch_id: int = None, page: 
     total = query.count()
     videos = query.offset((page - 1) * page_size).limit(page_size).all()
 
+    from app.services.comparator import get_disagreed_checkpoints
+
     result = []
     for video in videos:
         question = video.question
@@ -471,33 +529,84 @@ def get_assignment_progress(project_id: int = None, batch_id: int = None, page: 
             FinalResult.method.in_(["consensus", "majority", "expert", "single"]),
         ).count()
         total_cps = len(question.checkpoints) if question else 0
+        dropped_count = db.query(FinalResult).filter(
+            FinalResult.video_id == video.id, FinalResult.method == "dropped"
+        ).count()
 
         if not a_assign and not b_assign:
             status = "未分配"
+        elif dropped_count > 0:
+            status = "已废弃"
+        elif finalized_count >= total_cps and total_cps > 0:
+            status = "已定案"
         elif a_assign and a_assign.status == "submitted" and b_assign and b_assign.status == "submitted":
-            if finalized_count >= total_cps:
-                status = "已定案"
-            elif third_assign:
+            if third_assign:
                 if third_assign.status == "submitted":
-                    status = "第三人已提交"
+                    status = "待专家" if finalized_count < total_cps else "已定案"
+                elif third_assign.status == "issue_reported":
+                    status = "第三人报无效"
                 else:
                     status = "待第三人"
             else:
                 status = "比对完成"
+        elif (a_assign and a_assign.status == "issue_reported") and (b_assign and b_assign.status == "issue_reported"):
+            if third_assign:
+                if third_assign.status == "submitted":
+                    status = "待定案"
+                elif third_assign.status == "issue_reported":
+                    status = "全部报无效(待管理员)"
+                else:
+                    status = "待第三人确认"
+            else:
+                status = "双人报无效(待确认)"
+        elif (a_assign and a_assign.status == "issue_reported") or (b_assign and b_assign.status == "issue_reported"):
+            other_status = b_assign.status if (a_assign and a_assign.status == "issue_reported") else a_assign.status
+            if other_status == "submitted":
+                status = "技术无效(部分)"
+            else:
+                status = "技术无效(A/B部分提交)"
         elif (a_assign and a_assign.status == "submitted") or (b_assign and b_assign.status == "submitted"):
             status = "A/B部分提交"
         else:
             status = "已分配待标注"
 
+        # Compute arbitration_status
+        arbitration_status = None
+        both_submitted = (
+            a_assign and a_assign.status == "submitted"
+            and b_assign and b_assign.status == "submitted"
+        )
+        if status == "已定案" or status == "已废弃":
+            arbitration_status = "resolved" if third_assign and third_assign.status == "submitted" else None
+        elif both_submitted:
+            has_disagreement = len(get_disagreed_checkpoints(db, video.id)) > 0
+            if not has_disagreement:
+                arbitration_status = None
+            elif not third_assign:
+                arbitration_status = "unassigned"
+            elif third_assign.status == "submitted":
+                if finalized_count >= total_cps:
+                    arbitration_status = "resolved"
+                else:
+                    arbitration_status = "submitted"
+            else:
+                arbitration_status = "pending"
+        elif third_assign and third_assign.status != "pending":
+            arbitration_status = "waiting"
+
         result.append({
             "video_id": video.video_id,
+            "video_db_id": video.id,
             "question_id": question.question_id if question else "",
             "prompt_summary": (question.prompt[:60] + "...") if question and len(question.prompt) > 60 else (question.prompt if question else ""),
             "checkpoint_count": total_cps,
             "status": status,
             "finalized": finalized_count,
+            "arbitration_status": arbitration_status,
             "annotator_a": a_assign.annotator.display_name if a_assign and a_assign.annotator else None,
             "annotator_b": b_assign.annotator.display_name if b_assign and b_assign.annotator else None,
+            "annotator_a_id": a_assign.annotator_id if a_assign else None,
+            "annotator_b_id": b_assign.annotator_id if b_assign else None,
             "annotator_third": third_assign.annotator.display_name if third_assign and third_assign.annotator else None,
         })
 
@@ -517,13 +626,68 @@ def my_assignments(
         query = query.filter(Assignment.status == status)
     assignments = query.order_by(Assignment.assigned_at.desc()).all()
 
+    from app.services.comparator import get_disagreed_checkpoints
+
     result = []
     for a in assignments:
         video = a.video
         question = video.question if video else None
-        checkpoint_count = len(question.checkpoints) if question else 0
 
+        # Third-person visibility: only show when A/B both submitted AND disagreements exist
+        if a.role == "third" and a.status != "submitted":
+            a_assign = db.query(Assignment).filter(
+                Assignment.video_id == a.video_id, Assignment.role == "A"
+            ).first()
+            b_assign = db.query(Assignment).filter(
+                Assignment.video_id == a.video_id, Assignment.role == "B"
+            ).first()
+            both_done = (
+                a_assign and a_assign.status in ("submitted", "issue_reported")
+                and b_assign and b_assign.status in ("submitted", "issue_reported")
+            )
+            if not both_done:
+                continue
+            # Check if A/B reported invalid: submitted but has no annotations = was issue_reported
+            a_has_anns = db.query(Annotation).filter(Annotation.assignment_id == a_assign.id).count() > 0
+            b_has_anns = db.query(Annotation).filter(Annotation.assignment_id == b_assign.id).count() > 0
+            both_invalid = (not a_has_anns and not b_has_anns)
+            one_invalid = (not a_has_anns or not b_has_anns)
+            if both_invalid:
+                pass  # third sees all checkpoints
+            elif one_invalid:
+                pass  # third sees all (one side has no data)
+            else:
+                disagreed = get_disagreed_checkpoints(db, a.video_id)
+                if not disagreed:
+                    continue
+
+        checkpoint_count = len(question.checkpoints) if question else 0
         annotated_count = db.query(Annotation).filter(Annotation.assignment_id == a.id).count()
+
+        # For third-person, count checkpoints based on context
+        if a.role == "third":
+            a_assign = db.query(Assignment).filter(Assignment.video_id == a.video_id, Assignment.role == "A").first()
+            b_assign = db.query(Assignment).filter(Assignment.video_id == a.video_id, Assignment.role == "B").first()
+            a_has_anns = db.query(Annotation).filter(Annotation.assignment_id == a_assign.id).count() > 0 if a_assign else False
+            b_has_anns = db.query(Annotation).filter(Annotation.assignment_id == b_assign.id).count() > 0 if b_assign else False
+            if not a_has_anns or not b_has_anns:
+                pass  # third sees all checkpoints (one or both invalid)
+            else:
+                disagreed = get_disagreed_checkpoints(db, a.video_id)
+                checkpoint_count = len(disagreed)
+
+        # For expert, count pending_expert checkpoints (or all if no pending_expert = invalid review)
+        if a.role == "expert":
+            from app.models import FinalResult
+            pending_expert_count = db.query(FinalResult).filter(
+                FinalResult.video_id == a.video_id,
+                FinalResult.method == "pending_expert",
+            ).count()
+            if pending_expert_count > 0:
+                checkpoint_count = pending_expert_count
+            # else: keep full checkpoint_count (expert sees all for invalid review)
+
+        batch = video.batch if video else None
 
         result.append({
             "id": a.id,
@@ -532,6 +696,8 @@ def my_assignments(
             "status": a.status,
             "assigned_at": a.assigned_at.isoformat() if a.assigned_at else None,
             "submitted_at": a.submitted_at.isoformat() if a.submitted_at else None,
+            "batch_id": batch.id if batch else None,
+            "batch_name": batch.name if batch else "",
             "video": {
                 "video_id": video.video_id if video else "",
                 "oss_url": video.oss_url if video else "",
@@ -559,12 +725,48 @@ def get_assignment_detail(assignment_id: int, db: Session = Depends(get_db)):
 
     from app.services.comparator import get_disagreed_checkpoints
     disagreed_ids = []
+    both_ab_invalid = False
     if a.role == "third":
-        disagreed_ids = get_disagreed_checkpoints(db, video.id)
+        # Check if A/B have no annotations (= reported invalid)
+        a_assign = db.query(Assignment).filter(Assignment.video_id == video.id, Assignment.role == "A").first()
+        b_assign = db.query(Assignment).filter(Assignment.video_id == video.id, Assignment.role == "B").first()
+        a_has_anns = db.query(Annotation).filter(Annotation.assignment_id == a_assign.id).count() > 0 if a_assign else False
+        b_has_anns = db.query(Annotation).filter(Annotation.assignment_id == b_assign.id).count() > 0 if b_assign else False
+        both_ab_invalid = (not a_has_anns or not b_has_anns)
+        if not both_ab_invalid:
+            disagreed_ids = get_disagreed_checkpoints(db, video.id)
+
+    # For expert role: show checkpoints with pending_expert OR all if no FinalResults (invalid review)
+    pending_expert_ids = []
+    if a.role == "expert":
+        pending_expert_ids = [
+            fr.checkpoint_id for fr in db.query(FinalResult).filter(
+                FinalResult.video_id == video.id, FinalResult.method == "pending_expert"
+            ).all()
+        ]
+        # If no pending_expert records, expert sees all (e.g. invalid review)
+        if not pending_expert_ids:
+            pending_expert_ids = [cp.id for cp in checkpoints]
 
     cp_list = []
     for cp in checkpoints:
         is_disagreed = cp.id in disagreed_ids
+        is_pending_expert = cp.id in pending_expert_ids
+
+        if a.role == "third":
+            if both_ab_invalid:
+                needs_annotation = True
+                is_finalized = False
+            else:
+                needs_annotation = is_disagreed
+                is_finalized = not is_disagreed
+        elif a.role == "expert":
+            needs_annotation = is_pending_expert
+            is_finalized = not is_pending_expert
+        else:
+            needs_annotation = True
+            is_finalized = False
+
         cp_list.append({
             "id": cp.id,
             "checkpoint_id": cp.checkpoint_id,
@@ -576,9 +778,13 @@ def get_assignment_detail(assignment_id: int, db: Session = Depends(get_db)):
             "tag_id": cp.tag_id,
             "tag_name": cp.tag_name,
             "evidence_period": cp.evidence_period,
-            "needs_annotation": a.role != "third" or is_disagreed,
-            "is_finalized": a.role == "third" and not is_disagreed,
+            "needs_annotation": needs_annotation,
+            "is_finalized": is_finalized,
         })
+
+    # Get batch info for fail_code_mode
+    batch = video.batch
+    fail_code_mode = batch.fail_code_mode if batch else "optional"
 
     return {
         "assignment": {
@@ -596,6 +802,9 @@ def get_assignment_detail(assignment_id: int, db: Session = Depends(get_db)):
             "id": question.id,
             "question_id": question.question_id,
             "prompt": question.prompt,
+        },
+        "batch": {
+            "fail_code_mode": fail_code_mode or "optional",
         },
         "checkpoints": cp_list,
     }

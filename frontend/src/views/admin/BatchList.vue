@@ -61,6 +61,16 @@
             <el-radio-button value="dual">双人盲标</el-radio-button>
           </el-radio-group>
         </el-form-item>
+        <el-form-item label="失败码">
+          <el-radio-group v-model="newBatch.fail_code_mode">
+            <el-radio-button value="required">必选</el-radio-button>
+            <el-radio-button value="optional">可选</el-radio-button>
+            <el-radio-button value="disabled">不选</el-radio-button>
+          </el-radio-group>
+          <p style="color: #999; font-size: 12px; margin-top: 4px;">
+            {{ newBatch.fail_code_mode === 'required' ? '标注R/N时必须选择失败码' : newBatch.fail_code_mode === 'optional' ? '标注R/N时可选填失败码' : '不展示失败码选项' }}
+          </p>
+        </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="newBatch.description" type="textarea" />
         </el-form-item>
@@ -84,7 +94,7 @@ const emit = defineEmits(['select'])
 const batchList = ref([])
 const bankList = ref([])
 const showCreate = ref(false)
-const newBatch = ref({ bank_id: null, model_version: '', name: '', annotation_mode: 'single', description: '' })
+const newBatch = ref({ bank_id: null, model_version: '', name: '', annotation_mode: 'single', fail_code_mode: 'optional', description: '' })
 
 onMounted(async () => {
   await loadBatches()
@@ -116,7 +126,7 @@ async function createBatch() {
     const { data } = await api.post('/batches/', newBatch.value)
     ElMessage.success(`批次创建成功，已生成 ${data.videos_created} 个视频`)
     showCreate.value = false
-    newBatch.value = { bank_id: null, model_version: '', name: '', annotation_mode: 'single', description: '' }
+    newBatch.value = { bank_id: null, model_version: '', name: '', annotation_mode: 'single', fail_code_mode: 'optional', description: '' }
     await loadBatches()
   } catch (e) { ElMessage.error(e.response?.data?.detail || '创建失败') }
 }

@@ -2,29 +2,31 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.scorer import compute_ability_scores, compute_annotation_quality
-from app.models import FinalResult, Checkpoint
+from app.models import FinalResult, Checkpoint, Video
 from collections import Counter
 
 router = APIRouter(prefix="/api/scores", tags=["scores"])
 
 
 @router.get("/abilities")
-def get_ability_scores(project_id: int = None, db: Session = Depends(get_db)):
-    return compute_ability_scores(db, project_id)
+def get_ability_scores(project_id: int = None, batch_id: int = None, db: Session = Depends(get_db)):
+    return compute_ability_scores(db, project_id, batch_id)
 
 
 @router.get("/quality")
-def get_annotation_quality(project_id: int = None, db: Session = Depends(get_db)):
-    return compute_annotation_quality(db, project_id)
+def get_annotation_quality(project_id: int = None, batch_id: int = None, db: Session = Depends(get_db)):
+    return compute_annotation_quality(db, project_id, batch_id)
 
 
 @router.get("/fail-codes")
-def get_fail_code_distribution(project_id: int = None, db: Session = Depends(get_db)):
+def get_fail_code_distribution(project_id: int = None, batch_id: int = None, db: Session = Depends(get_db)):
     query = db.query(FinalResult.final_fail_code).filter(
         FinalResult.final_fail_code.isnot(None),
         FinalResult.final_fail_code != "",
     )
-    if project_id:
+    if batch_id:
+        query = query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+    elif project_id:
         from app.models import Question
         query = query.join(Checkpoint, FinalResult.checkpoint_id == Checkpoint.id).join(
             Question, Checkpoint.question_id == Question.id
@@ -38,6 +40,7 @@ def get_fail_code_distribution(project_id: int = None, db: Session = Depends(get
         "F04": "结构/解剖错误", "F05": "动作动态错误", "F06": "交互/接触错误",
         "F07": "物理/因果错误", "F08": "时序错误", "F09": "一致性错误",
         "F10": "镜头/构图错误", "F11": "视觉呈现错误",
+        "F010": "镜头/构图错误", "F011": "视觉呈现错误",
     }
 
     return [
@@ -47,14 +50,16 @@ def get_fail_code_distribution(project_id: int = None, db: Session = Depends(get
 
 
 @router.get("/tags")
-def get_tag_scores(project_id: int = None, db: Session = Depends(get_db)):
+def get_tag_scores(project_id: int = None, batch_id: int = None, db: Session = Depends(get_db)):
     query = db.query(
         Checkpoint.tag_id,
         Checkpoint.tag_name,
         FinalResult.final_score,
     ).join(FinalResult, FinalResult.checkpoint_id == Checkpoint.id)
 
-    if project_id:
+    if batch_id:
+        query = query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+    elif project_id:
         from app.models import Question
         query = query.join(Question, Checkpoint.question_id == Question.id).filter(
             Question.project_id == project_id

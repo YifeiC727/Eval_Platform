@@ -31,9 +31,11 @@ class Question(Base):
     id = Column(Integer, primary_key=True, index=True)
     question_id = Column(String(20), nullable=False)
     bank_id = Column(Integer, ForeignKey("question_banks.id"))
+    project_id = Column(Integer)
     prompt = Column(Text, nullable=False)
     language = Column(String(20))
     preprocess_note = Column(Text)
+    video_url = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     bank = relationship("QuestionBank", back_populates="questions")
     checkpoints = relationship("Checkpoint", back_populates="question")
@@ -64,6 +66,7 @@ class EvalBatch(Base):
     bank_id = Column(Integer, ForeignKey("question_banks.id"))
     model_version = Column(String(50))
     annotation_mode = Column(String(20), default="single")
+    fail_code_mode = Column(String(20), default="optional")
     status = Column(String(20), default="preparing")
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -138,3 +141,13 @@ class Project(Base):
     v6_version = Column(String(20), default="v6")
     status = Column(String(20), default="active")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BatchMember(Base):
+    __tablename__ = "batch_members"
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(Integer, ForeignKey("eval_batches.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    added_at = Column(DateTime, default=datetime.utcnow)
+    batch = relationship("EvalBatch")
+    user = relationship("User")

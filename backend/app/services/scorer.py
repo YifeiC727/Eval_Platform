@@ -1,12 +1,12 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from app.models import FinalResult, Checkpoint, Assignment, Annotation
+from app.models import FinalResult, Checkpoint, Assignment, Annotation, Video
 
 
 SCORE_MAP = {"C": 1.0, "R": 0.3, "N": 0.0, "NA": None}
 
 
-def compute_ability_scores(db: Session, project_id: int = None) -> list[dict]:
+def compute_ability_scores(db: Session, project_id: int = None, batch_id: int = None) -> list[dict]:
     query = db.query(
         Checkpoint.ability_id,
         Checkpoint.ability_name,
@@ -15,7 +15,9 @@ def compute_ability_scores(db: Session, project_id: int = None) -> list[dict]:
         FinalResult, FinalResult.checkpoint_id == Checkpoint.id
     )
 
-    if project_id:
+    if batch_id:
+        query = query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+    elif project_id:
         from app.models import Question
         query = query.join(Question, Checkpoint.question_id == Question.id).filter(
             Question.project_id == project_id
@@ -46,6 +48,22 @@ def compute_ability_scores(db: Session, project_id: int = None) -> list[dict]:
         else:
             ability_data[ability_id]["n_count"] += 1
 
+    # Ensure all 30 abilities are present (even if no data yet)
+    all_abilities = db.query(Checkpoint.ability_id, Checkpoint.ability_name).filter(
+        Checkpoint.ability_id.isnot(None)
+    ).distinct().all()
+
+    for ability_id, ability_name in all_abilities:
+        if ability_id not in ability_data:
+            ability_data[ability_id] = {
+                "ability_id": ability_id,
+                "ability_name": ability_name or "",
+                "scores": [],
+                "c_count": 0,
+                "r_count": 0,
+                "n_count": 0,
+            }
+
     results = []
     for aid in sorted(ability_data.keys()):
         d = ability_data[aid]
@@ -56,8 +74,10 @@ def compute_ability_scores(db: Session, project_id: int = None) -> list[dict]:
             coverage = "正式排名"
         elif n >= 5:
             coverage = "初步趋势"
-        else:
+        elif n > 0:
             coverage = "证据不足"
+        else:
+            coverage = "暂无数据"
 
         results.append({
             "ability_id": d["ability_id"],
@@ -74,11 +94,13 @@ def compute_ability_scores(db: Session, project_id: int = None) -> list[dict]:
     return results
 
 
-def compute_annotation_quality(db: Session, project_id: int = None) -> dict:
-    from app.models import Video, Question
+def compute_annotation_quality(db: Session, project_id: int = None, batch_id: int = None) -> dict:
+    from app.models import Question
 
     query = db.query(Assignment).filter(Assignment.status == "submitted")
-    if project_id:
+    if batch_id:
+        query = query.join(Video).filter(Video.batch_id == batch_id)
+    elif project_id:
         query = query.join(Video).join(Question).filter(Question.project_id == project_id)
 
     all_assignments = query.all()
@@ -111,7 +133,10 @@ def compute_annotation_quality(db: Session, project_id: int = None) -> dict:
     agreement_rate = (agreed_checkpoints / total_checkpoints * 100) if total_checkpoints > 0 else 0
     third_rate = (third_needed / total_checkpoints * 100) if total_checkpoints > 0 else 0
 
-    pending_expert = db.query(FinalResult).filter(FinalResult.method == "pending_expert").count()
+    pending_query = db.query(FinalResult).filter(FinalResult.method == "pending_expert")
+    if batch_id:
+        pending_query = pending_query.join(Video, FinalResult.video_id == Video.id).filter(Video.batch_id == batch_id)
+    pending_expert = pending_query.count()
 
     return {
         "total_checkpoints_compared": total_checkpoints,
