@@ -52,7 +52,7 @@ async function handleLogin() {
       display_name: username.value.trim(),
       role: role.value,
     })
-    localStorage.setItem('user', JSON.stringify(data))
+    sessionStorage.setItem('user', JSON.stringify(data))
     ElMessage.success(`欢迎, ${data.display_name}`)
     const target = data.role === 'admin' ? '/admin' : data.role === 'lead' ? '/dashboard' : '/tasks'
     router.push(target)

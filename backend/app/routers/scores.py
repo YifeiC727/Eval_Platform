@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.services.scorer import compute_ability_scores, compute_annotation_quality
+from app.services.scorer import compute_ability_scores, compute_annotation_quality, compute_module_scores
 from app.models import FinalResult, Checkpoint, Video
 from collections import Counter
 
@@ -16,6 +16,11 @@ def get_ability_scores(project_id: int = None, batch_id: int = None, db: Session
 @router.get("/quality")
 def get_annotation_quality(project_id: int = None, batch_id: int = None, db: Session = Depends(get_db)):
     return compute_annotation_quality(db, project_id, batch_id)
+
+
+@router.get("/modules")
+def get_module_scores(batch_id: int = None, db: Session = Depends(get_db)):
+    return compute_module_scores(db, batch_id)
 
 
 @router.get("/fail-codes")
@@ -41,6 +46,10 @@ def get_fail_code_distribution(project_id: int = None, batch_id: int = None, db:
         "F07": "物理/因果错误", "F08": "时序错误", "F09": "一致性错误",
         "F10": "镜头/构图错误", "F11": "视觉呈现错误",
         "F010": "镜头/构图错误", "F011": "视觉呈现错误",
+        "RF01": "内容/类型错误", "RF02": "数量、身份或角色绑定错误",
+        "RF03": "时序、顺序或同步错误", "RF04": "音质伪影",
+        "RF05": "连续性错误", "RF06": "混音层级错误", "RF07": "空间声错误",
+        "N1": "目标声音缺失", "N2": "完全错误或无关", "N3": "严重崩坏不可辨",
     }
 
     return [

@@ -94,6 +94,44 @@ def compute_ability_scores(db: Session, project_id: int = None, batch_id: int = 
     return results
 
 
+def compute_module_scores(db: Session, batch_id: int = None) -> dict:
+    """按模块（视频/声音/同步）计算得分，仅对 T2AV 有意义"""
+    abilities = compute_ability_scores(db, batch_id=batch_id)
+
+    modules = {
+        "visual": {"name": "视频层", "prefix": "C", "scores": []},
+        "audio": {"name": "声音层", "prefix": "A", "scores": []},
+        "av_sync": {"name": "音画同步层", "prefix": "AV", "scores": []},
+    }
+
+    for ab in abilities:
+        aid = ab["ability_id"] or ""
+        score = ab["score"]
+        if ab["total_n"] == 0:
+            continue
+        if aid.startswith("AV"):
+            modules["av_sync"]["scores"].append(score)
+        elif aid.startswith("A"):
+            modules["audio"]["scores"].append(score)
+        elif aid.startswith("C"):
+            modules["visual"]["scores"].append(score)
+
+    result = {}
+    for key, mod in modules.items():
+        scores = mod["scores"]
+        result[key] = {
+            "name": mod["name"],
+            "score": round(sum(scores) / len(scores), 1) if scores else 0,
+            "ability_count": len(scores),
+        }
+
+    # 综合分 = 三模块等权 1/3
+    mod_scores = [result[k]["score"] for k in ["visual", "audio", "av_sync"] if result[k]["ability_count"] > 0]
+    result["overall"] = round(sum(mod_scores) / len(mod_scores), 1) if mod_scores else 0
+
+    return result
+
+
 def compute_annotation_quality(db: Session, project_id: int = None, batch_id: int = None) -> dict:
     from app.models import Question
 

@@ -20,7 +20,7 @@ const router = createRouter({
 })
 
 router.beforeEach((to, from, next) => {
-  const user = JSON.parse(localStorage.getItem('user') || '{}')
+  const user = JSON.parse(sessionStorage.getItem('user') || '{}')
   if (to.path !== '/login' && !user.id) {
     next('/login')
   } else {

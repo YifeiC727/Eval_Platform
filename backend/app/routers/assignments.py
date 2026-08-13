@@ -805,6 +805,7 @@ def get_assignment_detail(assignment_id: int, db: Session = Depends(get_db)):
         },
         "batch": {
             "fail_code_mode": fail_code_mode or "optional",
+            "task_type": batch.task_type if batch else "t2v",
         },
         "checkpoints": cp_list,
     }

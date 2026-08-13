@@ -55,6 +55,12 @@
         <el-form-item label="批次名称（可选）">
           <el-input v-model="newBatch.name" placeholder="默认: 题库名 + 模型版本" />
         </el-form-item>
+        <el-form-item label="任务类型">
+          <el-radio-group v-model="newBatch.task_type">
+            <el-radio-button value="t2v">T2V（文生视频）</el-radio-button>
+            <el-radio-button value="t2av">T2AV（文生音视频）</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="标注模式">
           <el-radio-group v-model="newBatch.annotation_mode">
             <el-radio-button value="single">单人标注</el-radio-button>
@@ -94,7 +100,7 @@ const emit = defineEmits(['select'])
 const batchList = ref([])
 const bankList = ref([])
 const showCreate = ref(false)
-const newBatch = ref({ bank_id: null, model_version: '', name: '', annotation_mode: 'single', fail_code_mode: 'optional', description: '' })
+const newBatch = ref({ bank_id: null, model_version: '', name: '', task_type: 't2v', annotation_mode: 'single', fail_code_mode: 'optional', description: '' })
 
 onMounted(async () => {
   await loadBatches()

@@ -2,11 +2,25 @@
   <div>
     <div style="display: flex; justify-content: space-between; align-items: center;">
       <el-page-header title="结果看板" :icon="null" />
-      <el-select v-model="selectedBatch" placeholder="选择批次" clearable size="default" style="width: 280px;" @change="onBatchChange">
-        <el-option label="全部批次（汇总）" :value="null" />
-        <el-option v-for="b in batches" :key="b.id" :label="b.name + (b.model_version ? ' (' + b.model_version + ')' : '')" :value="b.id" />
-      </el-select>
+      <div style="display: flex; gap: 12px; align-items: center;">
+        <el-radio-group v-model="filterTaskType" size="small" @change="onTaskTypeChange">
+          <el-radio-button value="t2v">T2V</el-radio-button>
+          <el-radio-button value="t2av">T2AV</el-radio-button>
+        </el-radio-group>
+        <el-select v-model="selectedBatch" placeholder="选择批次" clearable size="default" style="width: 280px;" @change="onBatchChange">
+          <el-option label="全部批次（汇总）" :value="null" />
+          <el-option v-for="b in filteredBatches" :key="b.id" :label="b.name + (b.model_version ? ' (' + b.model_version + ')' : '')" :value="b.id" />
+        </el-select>
+      </div>
     </div>
+
+    <!-- T2AV 模块得分卡片 -->
+    <el-row v-if="moduleScores && selectedBatchTaskType === 't2av'" :gutter="16" style="margin-top: 16px;">
+      <el-col :span="6"><el-card shadow="hover"><el-statistic title="视频层 (Visual)" :value="moduleScores.visual?.score || 0" suffix="分" /></el-card></el-col>
+      <el-col :span="6"><el-card shadow="hover"><el-statistic title="声音层 (Audio)" :value="moduleScores.audio?.score || 0" suffix="分" /></el-card></el-col>
+      <el-col :span="6"><el-card shadow="hover"><el-statistic title="音画同步 (AV Sync)" :value="moduleScores.av_sync?.score || 0" suffix="分" /></el-card></el-col>
+      <el-col :span="6"><el-card shadow="hover"><el-statistic title="综合分" :value="moduleScores.overall || 0" suffix="分" /></el-card></el-col>
+    </el-row>
 
     <el-row :gutter="20" style="margin-top: 20px;">
       <el-col :span="6">
@@ -27,7 +41,7 @@
       <template #header>
         <span style="font-weight: 600;">30项核心能力排名（得分从低到高）</span>
       </template>
-      <el-table :data="abilities" stripe style="width: 100%;" max-height="500">
+      <el-table :data="filteredAbilities" stripe style="width: 100%;" max-height="500">
         <el-table-column prop="ability_id" label="ID" width="60" fixed />
         <el-table-column prop="ability_name" label="能力名称" min-width="180" fixed />
         <template v-if="selectedBatch">
@@ -55,7 +69,7 @@
           </el-table-column>
         </template>
         <template v-else>
-          <el-table-column v-for="b in batches" :key="b.id" :label="b.model_version || b.name" min-width="140">
+          <el-table-column v-for="b in filteredBatches" :key="b.id" :label="b.model_version || b.name" min-width="140">
             <template #default="{ row }">
               <div>
                 <span :style="{ color: (row['score_' + b.id] || 0) < 50 ? '#e6393e' : (row['score_' + b.id] || 0) < 70 ? '#e6a23c' : '#67c23a', fontWeight: 600 }">
@@ -73,7 +87,7 @@
       <el-col :span="12">
         <el-card>
           <template #header><span style="font-weight: 600;">失败码分布</span></template>
-          <el-table :data="failCodes" stripe size="small">
+          <el-table :data="filteredFailCodes" stripe size="small">
             <el-table-column prop="code" label="码" width="60" />
             <el-table-column prop="name" label="名称" />
             <el-table-column prop="count" label="次数" width="80" sortable />
@@ -83,7 +97,7 @@
       <el-col :span="12">
         <el-card>
           <template #header><span style="font-weight: 600;">三级标签诊断（得分最低前20）</span></template>
-          <el-table :data="tags.slice(0, 20)" stripe size="small">
+          <el-table :data="filteredTags.slice(0, 20)" stripe size="small">
             <el-table-column prop="tag_id" label="ID" width="100" />
             <el-table-column prop="tag_name" label="标签" />
             <el-table-column prop="score" label="得分" width="70" />
@@ -98,17 +112,17 @@
       <template #header><span style="font-weight: 600;">版本对比</span></template>
       <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px;">
         <el-select v-model="compareA" placeholder="选择批次A" style="width: 250px;">
-          <el-option v-for="b in batches" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
+          <el-option v-for="b in filteredBatches" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
         </el-select>
         <span style="font-size: 18px; font-weight: 600;">VS</span>
         <el-select v-model="compareB" placeholder="选择批次B" style="width: 250px;">
-          <el-option v-for="b in batches" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
+          <el-option v-for="b in filteredBatches" :key="b.id" :label="`${b.name} (${b.model_version})`" :value="b.id" />
         </el-select>
         <el-button type="primary" @click="doCompare" :disabled="!compareA || !compareB || compareA === compareB" :loading="comparing">
           对比
         </el-button>
       </div>
-      <el-table v-if="comparison" :data="comparison.comparison" stripe :row-class-name="deltaRowClass">
+      <el-table v-if="comparison" :data="filteredComparison" stripe :row-class-name="deltaRowClass">
         <el-table-column prop="ability_id" label="ID" width="60" />
         <el-table-column prop="ability_name" label="能力" min-width="180" />
         <el-table-column :label="comparison.batch_a.model || 'A'" width="80">
@@ -139,7 +153,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../api.js'
 
@@ -149,10 +163,52 @@ const failCodes = ref([])
 const tags = ref([])
 const batches = ref([])
 const selectedBatch = ref(null)
+const filterTaskType = ref('t2v')
+const moduleScores = ref(null)
 const compareA = ref(null)
 const compareB = ref(null)
 const comparison = ref(null)
 const comparing = ref(false)
+
+const filteredBatches = computed(() => {
+  if (!filterTaskType.value) return batches.value
+  return batches.value.filter(b => (b.task_type || 't2v') === filterTaskType.value)
+})
+
+const selectedBatchTaskType = computed(() => {
+  if (!selectedBatch.value) return filterTaskType.value || null
+  const b = batches.value.find(x => x.id === selectedBatch.value)
+  return b?.task_type || 't2v'
+})
+
+function isAbilityForTaskType(abilityId) {
+  if (filterTaskType.value === 't2v') return abilityId?.startsWith('C')
+  return true // t2av shows all
+}
+
+const filteredAbilities = computed(() => {
+  return abilities.value.filter(a => isAbilityForTaskType(a.ability_id))
+})
+
+const filteredFailCodes = computed(() => {
+  if (filterTaskType.value === 't2v') {
+    return failCodes.value.filter(f => f.code?.startsWith('F'))
+  }
+  return failCodes.value
+})
+
+const filteredTags = computed(() => {
+  if (filterTaskType.value === 't2v') {
+    // T2V tags start with D (not AD, not AVD)
+    return tags.value.filter(t => t.tag_id && t.tag_id.startsWith('D') && !t.tag_id.startsWith('AD') && !t.tag_id.startsWith('AVD'))
+  }
+  return tags.value
+})
+
+const filteredComparison = computed(() => {
+  if (!comparison.value) return []
+  return comparison.value.comparison.filter(a => isAbilityForTaskType(a.ability_id))
+})
 
 onMounted(async () => {
   try {
@@ -180,9 +236,9 @@ async function loadAbilities() {
       const { data } = await api.get('/scores/abilities', { params })
       abilities.value = data
     } else {
-      // All batches: load each batch's scores for comparison
+      // All batches of current type: load each batch's scores for comparison
       const allScores = {}
-      for (const b of batches.value) {
+      for (const b of filteredBatches.value) {
         const { data } = await api.get('/scores/abilities', { params: { batch_id: b.id } })
         for (const row of data) {
           if (!allScores[row.ability_id]) {
@@ -193,8 +249,8 @@ async function loadAbilities() {
         }
       }
       abilities.value = Object.values(allScores).sort((a, b) => {
-        const aAvg = batches.value.reduce((s, bt) => s + (a[`score_${bt.id}`] || 0), 0) / batches.value.length
-        const bAvg = batches.value.reduce((s, bt) => s + (b[`score_${bt.id}`] || 0), 0) / batches.value.length
+        const aAvg = filteredBatches.value.reduce((s, bt) => s + (a[`score_${bt.id}`] || 0), 0) / (filteredBatches.value.length || 1)
+        const bAvg = filteredBatches.value.reduce((s, bt) => s + (b[`score_${bt.id}`] || 0), 0) / (filteredBatches.value.length || 1)
         return aAvg - bAvg
       })
     }
@@ -228,7 +284,24 @@ async function loadTags() {
 }
 
 async function onBatchChange() {
-  await Promise.all([loadAbilities(), loadQuality(), loadFailCodes(), loadTags()])
+  await Promise.all([loadAbilities(), loadQuality(), loadFailCodes(), loadTags(), loadModuleScores()])
+}
+
+function onTaskTypeChange() {
+  selectedBatch.value = null
+  moduleScores.value = null
+  onBatchChange()
+}
+
+async function loadModuleScores() {
+  if (selectedBatch.value && selectedBatchTaskType.value === 't2av') {
+    try {
+      const { data } = await api.get('/scores/modules', { params: { batch_id: selectedBatch.value } })
+      moduleScores.value = data
+    } catch { moduleScores.value = null }
+  } else {
+    moduleScores.value = null
+  }
 }
 
 function deltaRowClass({ row }) {

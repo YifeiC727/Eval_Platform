@@ -69,6 +69,9 @@
               <div v-else>
                 <div style="display: flex; gap: 8px; align-items: center; margin-bottom: 8px;">
                   <el-tag size="small">CP{{ String(cp.seq).padStart(2, '0') }}</el-tag>
+                  <el-tag v-if="taskType === 't2av'" size="small" :type="cp.ability_id?.startsWith('AV') ? 'danger' : cp.ability_id?.startsWith('A') ? 'warning' : 'success'" effect="plain">
+                    {{ cp.ability_id?.startsWith('AV') ? '音画同步' : cp.ability_id?.startsWith('A') ? '声音' : '视频' }}
+                  </el-tag>
                   <span style="font-weight: 500;">{{ cp.text }}</span>
                 </div>
                 <div style="color: #666; font-size: 13px; margin-bottom: 12px;">
@@ -88,7 +91,7 @@
                   <el-select v-model="annotations[cp.id].fail_code"
                     :placeholder="failCodeMode === 'required' ? '请选择失败码（必填）' : '选择失败码（可选）'"
                     size="small" style="width: 280px;" clearable>
-                    <el-option v-for="fc in failCodes" :key="fc.code" :label="fc.code + ' ' + fc.name" :value="fc.code" />
+                    <el-option v-for="fc in getFailCodes(annotations[cp.id].score, cp.ability_id)" :key="fc.code" :label="fc.code + ' ' + fc.name" :value="fc.code" />
                   </el-select>
                 </div>
                 <el-input v-model="annotations[cp.id].note" placeholder="备注（可选，如对检查点拆解的建议等）" size="small" style="margin-top: 8px;" />
@@ -145,7 +148,7 @@ const currentTaskIndex = computed(() => {
 const hasPrev = computed(() => currentTaskIndex.value > 0)
 const hasNext = computed(() => currentTaskIndex.value < taskIds.value.length - 1)
 
-const failCodes = [
+const FAIL_CODES_T2V = [
   { code: 'F01', name: '要求遗漏' },
   { code: 'F02', name: '语义/指令错误' },
   { code: 'F03', name: '数量/绑定错误' },
@@ -158,6 +161,36 @@ const failCodes = [
   { code: 'F10', name: '镜头/构图错误' },
   { code: 'F11', name: '视觉呈现错误' },
 ]
+
+const FAIL_CODES_T2AV_R = [
+  { code: 'RF01', name: '内容/类型错误' },
+  { code: 'RF02', name: '数量、身份或角色绑定错误' },
+  { code: 'RF03', name: '时序、顺序或同步错误' },
+  { code: 'RF04', name: '音质伪影' },
+  { code: 'RF05', name: '连续性错误' },
+  { code: 'RF06', name: '混音层级错误' },
+  { code: 'RF07', name: '空间声错误' },
+]
+
+const FAIL_CODES_T2AV_N = [
+  { code: 'N1', name: '目标声音缺失' },
+  { code: 'N2', name: '完全错误或无关' },
+  { code: 'N3', name: '严重崩坏不可辨' },
+]
+
+const taskType = computed(() => detail.value?.batch?.task_type || 't2v')
+
+function getFailCodes(score, abilityId) {
+  if (taskType.value === 't2av') {
+    // 视频层检查点(C开头)用 F01-F11，声音/同步层(A/AV开头)用 RF/N
+    const isAudioOrSync = abilityId && (abilityId.startsWith('AV') || abilityId.startsWith('A'))
+    if (isAudioOrSync) {
+      return score === 'R' ? FAIL_CODES_T2AV_R : FAIL_CODES_T2AV_N
+    }
+    return FAIL_CODES_T2V
+  }
+  return FAIL_CODES_T2V
+}
 
 const activeCheckpoints = computed(() => detail.value?.checkpoints?.filter(cp => cp.needs_annotation) || [])
 const annotatedCount = computed(() => activeCheckpoints.value.filter(cp => annotations[cp.id]?.score).length)
@@ -246,7 +279,9 @@ async function saveAnnotations() {
     await api.post('/annotations/submit', buildPayload())
     ElMessage.success('已暂存')
   } catch (e) {
-    ElMessage.error('保存失败: ' + (e.response?.data?.detail || e.message))
+    const detail = e.response?.data?.detail
+    const msg = typeof detail === 'string' ? detail : JSON.stringify(detail) || e.message
+    ElMessage.error('保存失败: ' + msg)
   } finally {
     saving.value = false
   }

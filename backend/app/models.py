@@ -65,6 +65,7 @@ class EvalBatch(Base):
     name = Column(String(200), nullable=False)
     bank_id = Column(Integer, ForeignKey("question_banks.id"))
     model_version = Column(String(50))
+    task_type = Column(String(20), default="t2v")
     annotation_mode = Column(String(20), default="single")
     fail_code_mode = Column(String(20), default="optional")
     status = Column(String(20), default="preparing")

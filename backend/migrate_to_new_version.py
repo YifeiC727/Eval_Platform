@@ -38,6 +38,7 @@ print('  batch_members ✓')
 print('[3/5] 添加新列...')
 alter_cmds = [
     ('eval_batches', 'fail_code_mode', 'TEXT DEFAULT "optional"'),
+    ('eval_batches', 'task_type', 'TEXT DEFAULT "t2v"'),
     ('questions', 'video_url', 'TEXT'),
     ('questions', 'project_id', 'INTEGER'),
 ]
@@ -58,6 +59,19 @@ print(f'  失败码修复: annotations={n1+n2}, final_results={n3+n4}')
 
 # 5. 从现有 assignments 自动生成 batch_members
 print('[5/5] 生成 batch_members...')
+# Some previous deployments created this table through SQLAlchemy before the
+# migration ran, so the table may be missing the UNIQUE(batch_id, user_id)
+# constraint. Deduplicate first and enforce idempotency with a unique index.
+cur.execute('''
+DELETE FROM batch_members
+WHERE id NOT IN (
+    SELECT MIN(id) FROM batch_members GROUP BY batch_id, user_id
+)
+''')
+cur.execute('''
+CREATE UNIQUE INDEX IF NOT EXISTS uq_batch_members_batch_user
+ON batch_members(batch_id, user_id)
+''')
 cur.execute('''
 INSERT OR IGNORE INTO batch_members (batch_id, user_id, added_at)
 SELECT DISTINCT v.batch_id, a.annotator_id, datetime('now')

@@ -55,10 +55,9 @@ class TestUsers:
         r = client.post("/api/users/", json={"username": "ann_02", "role": "annotator"})
         assert r.status_code == 400
 
-    def test_login_creates_user(self):
+    def test_login_nonexistent_user_returns_401(self):
         r = client.post("/api/users/login", json={"username": "new_user", "role": "annotator"})
-        assert r.status_code == 200
-        assert r.json()["username"] == "new_user"
+        assert r.status_code == 401
 
     def test_login_existing_user(self):
         client.post("/api/users/", json={"username": "existing", "role": "admin"})
@@ -107,17 +106,19 @@ class TestAnnotationFlow:
         assert ann.score == "C"
         assert ann.fail_code is None
 
-    def test_annotation_validation_r_requires_failcode(self):
-        """R 必须有失败码"""
+    def test_annotation_validation_r_allows_no_failcode(self):
+        """R without fail_code is allowed (fail_code is optional)"""
         from app.schemas import AnnotationSubmit
-        with pytest.raises(Exception):
-            AnnotationSubmit(checkpoint_id=1, score="R", fail_code=None)
+        ann = AnnotationSubmit(checkpoint_id=1, score="R", fail_code=None)
+        assert ann.score == "R"
+        assert ann.fail_code is None
 
-    def test_annotation_validation_n_requires_failcode(self):
-        """N 必须有失败码"""
+    def test_annotation_validation_n_allows_no_failcode(self):
+        """N without fail_code is allowed (fail_code is optional)"""
         from app.schemas import AnnotationSubmit
-        with pytest.raises(Exception):
-            AnnotationSubmit(checkpoint_id=1, score="N", fail_code=None)
+        ann = AnnotationSubmit(checkpoint_id=1, score="N", fail_code=None)
+        assert ann.score == "N"
+        assert ann.fail_code is None
 
     def test_annotation_validation_c_rejects_failcode(self):
         """C 有失败码时应报错"""
