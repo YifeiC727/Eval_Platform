@@ -92,9 +92,350 @@ def export_my_annotations(user_id: int = None, db: Session = Depends(get_db)):
 
 @router.get("/results")
 def export_results(project_id: int = None, batch_id: int = None, db: Session = Depends(get_db)):
+    from app.models import EvalBatch
+
+    # Check if this is a PE batch
+    is_pe = False
+    if batch_id:
+        batch = db.query(EvalBatch).filter(EvalBatch.id == batch_id).first()
+        if batch and batch.eval_mode == "pe":
+            is_pe = True
+
+    if is_pe:
+        return _export_pe_results(batch_id, db)
+    else:
+        return _export_base_results(project_id, batch_id, db)
+
+
+def _export_pe_results(batch_id: int, db: Session):
+    """PE评测专用导出：A/B得分对比 + 增益Δ + 胜平负 + 原因分布"""
+    from app.models import EvalBatch
     wb = Workbook()
 
-    # ========== Sheet 1: 30项能力得分 ==========
+    batch = db.query(EvalBatch).filter(EvalBatch.id == batch_id).first()
+
+    # ========== Sheet 1: PE总览指标 ==========
+    ws1 = wb.active
+    ws1.title = "PE总览"
+    ws1.append(["指标", "值", "说明"])
+    _style_header(ws1)
+
+    # Collect per-question A/B scores
+    videos = db.query(Video).filter(Video.batch_id == batch_id).all()
+    question_scores = []
+
+    for video in videos:
+        q = video.question
+        if not q:
+            continue
+
+        # Get finalized annotations for this video
+        assignments = db.query(Assignment).filter(
+            Assignment.video_id == video.id,
+            Assignment.status == "submitted",
+        ).all()
+
+        # Collect A/B scores from annotations
+        a_scores = []
+        b_scores = []
+        pe_comparison = None
+        pe_reason = None
+        pe_gsb_raw = None
+
+        for asgn in assignments:
+            if asgn.pe_comparison:
+                pe_gsb_raw = asgn.pe_comparison
+                # pe_comparison is JSON: {"dynamics": "b_better", ..., "overall": "b_better"}
+                try:
+                    import json as _json
+                    gsb = _json.loads(asgn.pe_comparison)
+                    pe_comparison = gsb.get("overall", "tie")
+                except (ValueError, TypeError):
+                    pe_comparison = asgn.pe_comparison  # fallback: old single-value format
+            if asgn.pe_reason:
+                try:
+                    import json as _json
+                    reasons = _json.loads(asgn.pe_reason)
+                    # Get the overall reason or first available
+                    pe_reason = reasons.get("overall") or next(iter(reasons.values()), None) if isinstance(reasons, dict) else asgn.pe_reason
+                except (ValueError, TypeError):
+                    pe_reason = asgn.pe_reason
+
+            anns = db.query(Annotation).filter(Annotation.assignment_id == asgn.id).all()
+            for ann in anns:
+                if ann.score in SCORE_MAP:
+                    if ann.target == "A":
+                        a_scores.append(SCORE_MAP[ann.score])
+                    elif ann.target == "B":
+                        b_scores.append(SCORE_MAP[ann.score])
+
+        if a_scores or b_scores:
+            a_avg = sum(a_scores) / len(a_scores) * 100 if a_scores else None
+            b_avg = sum(b_scores) / len(b_scores) * 100 if b_scores else None
+            delta = (b_avg - a_avg) if (a_avg is not None and b_avg is not None) else None
+            question_scores.append({
+                "qid": q.question_id,
+                "prompt": q.prompt,
+                "a_score": a_avg,
+                "b_score": b_avg,
+                "delta": delta,
+                "comparison": pe_comparison,
+                "reason": pe_reason,
+                "gsb_raw": pe_gsb_raw,
+                "a_n": len(a_scores),
+                "b_n": len(b_scores),
+            })
+
+    # Calculate summary metrics
+    valid_qs = [q for q in question_scores if q["a_score"] is not None and q["b_score"] is not None]
+    total_qs = len(valid_qs)
+
+    if total_qs > 0:
+        avg_a = sum(q["a_score"] for q in valid_qs) / total_qs
+        avg_b = sum(q["b_score"] for q in valid_qs) / total_qs
+        avg_delta = avg_b - avg_a
+
+        b_better = sum(1 for q in valid_qs if q["comparison"] in ("B_better", "b_better"))
+        tie = sum(1 for q in valid_qs if q["comparison"] in ("tie", "same_good", "same_bad"))
+        b_worse = sum(1 for q in valid_qs if q["comparison"] in ("B_worse", "b_worse", "a_better", "A_better"))
+        # Fallback: if no pe_comparison, use delta
+        if b_better + tie + b_worse == 0:
+            b_better = sum(1 for q in valid_qs if q["delta"] and q["delta"] > 5)
+            tie = sum(1 for q in valid_qs if q["delta"] and abs(q["delta"]) <= 5)
+            b_worse = sum(1 for q in valid_qs if q["delta"] and q["delta"] < -5)
+    else:
+        avg_a = avg_b = avg_delta = 0
+        b_better = tie = b_worse = 0
+
+    ws1.append(["A绝对得分", round(avg_a, 1), "A(直出)的检查点均分"])
+    ws1.append(["B绝对得分", round(avg_b, 1), "B(PE)的检查点均分"])
+    ws1.append(["PE增益Δ", round(avg_delta, 1), "B得分 - A得分"])
+    ws1.append(["有效题目数", total_qs, "同时有A/B得分的题目"])
+    ws1.append([""])
+    ws1.append(["B更好(胜)", b_better, f"{round(b_better/total_qs*100,1) if total_qs else 0}%"])
+    ws1.append(["基本持平(平)", tie, f"{round(tie/total_qs*100,1) if total_qs else 0}%"])
+    ws1.append(["B更差(负)", b_worse, f"{round(b_worse/total_qs*100,1) if total_qs else 0}%"])
+
+    # ========== Sheet 2: 按能力的PE增益 ==========
+    ws2 = wb.create_sheet("能力维度PE增益")
+    ws2.append(["能力ID", "能力名称", "A得分", "B得分", "增益Δ", "A有效n", "B有效n"])
+    _style_header(ws2)
+
+    # Collect per-ability A/B scores
+    ability_a = defaultdict(lambda: {"name": "", "scores": []})
+    ability_b = defaultdict(lambda: {"name": "", "scores": []})
+
+    for video in videos:
+        q = video.question
+        if not q:
+            continue
+        assignments = db.query(Assignment).filter(
+            Assignment.video_id == video.id, Assignment.status == "submitted"
+        ).all()
+        for asgn in assignments:
+            anns = db.query(Annotation).filter(Annotation.assignment_id == asgn.id).all()
+            for ann in anns:
+                if ann.score not in SCORE_MAP:
+                    continue
+                cp = ann.checkpoint
+                if not cp:
+                    continue
+                aid = cp.ability_id or "UNKNOWN"
+                if ann.target == "A":
+                    ability_a[aid]["name"] = cp.ability_name or ""
+                    ability_a[aid]["scores"].append(SCORE_MAP[ann.score])
+                elif ann.target == "B":
+                    ability_b[aid]["name"] = cp.ability_name or ""
+                    ability_b[aid]["scores"].append(SCORE_MAP[ann.score])
+
+    all_aids = sorted(set(list(ability_a.keys()) + list(ability_b.keys())))
+    ability_rows = []
+    for aid in all_aids:
+        a_data = ability_a[aid]
+        b_data = ability_b[aid]
+        a_n = len(a_data["scores"])
+        b_n = len(b_data["scores"])
+        a_score = round(sum(a_data["scores"]) / a_n * 100, 1) if a_n else None
+        b_score = round(sum(b_data["scores"]) / b_n * 100, 1) if b_n else None
+        delta = round(b_score - a_score, 1) if (a_score is not None and b_score is not None) else None
+        name = a_data["name"] or b_data["name"]
+        ability_rows.append((aid, name, a_score, b_score, delta, a_n, b_n))
+
+    ability_rows.sort(key=lambda x: x[4] if x[4] is not None else 0)
+    for row in ability_rows:
+        ws2.append(list(row))
+
+    # ========== Sheet 3: 题目明细（含GSB维度） ==========
+    ws3 = wb.create_sheet("题目明细")
+
+    is_dual = batch.annotation_mode == "dual"
+
+    # Build header
+    header = ["题目ID", "Prompt", "PE Prompt", "A得分", "B得分", "增益Δ",
+              "动态与物理", "动态原因", "声音效果", "声音原因",
+              "镜头语言", "镜头原因", "视觉美学", "美学原因",
+              "综合评价", "综合原因"]
+    if is_dual:
+        header += ["标注员B-动态", "标注员B-声音", "标注员B-镜头", "标注员B-美学", "标注员B-综合", "标注员B-原因"]
+    header += ["A检查点数", "B检查点数"]
+    ws3.append(header)
+    _style_header(ws3)
+
+    import json as _json
+    gsb_labels = {"a_better": "A更好", "b_better": "B更好", "same_good": "一样好", "same_bad": "一样差"}
+
+    for video in videos:
+        q = video.question
+        if not q:
+            continue
+
+        # Find this question's score data
+        q_data = next((qs for qs in question_scores if qs["qid"] == q.question_id), None)
+        if not q_data:
+            continue
+
+        # Get GSB from all submitted assignments
+        assignments = db.query(Assignment).filter(
+            Assignment.video_id == video.id, Assignment.status == "submitted"
+        ).all()
+
+        gsb_list = []  # list of (gsb_dict, reasons_dict) per annotator
+        for asgn in assignments:
+            gsb = {}
+            reasons = {}
+            if asgn.pe_comparison:
+                try:
+                    gsb = _json.loads(asgn.pe_comparison)
+                except:
+                    gsb = {}
+            if asgn.pe_reason:
+                try:
+                    reasons = _json.loads(asgn.pe_reason) if isinstance(asgn.pe_reason, str) else {}
+                except:
+                    reasons = {}
+            if gsb:
+                gsb_list.append((gsb, reasons))
+
+        # First annotator's GSB
+        gsb1 = gsb_list[0][0] if gsb_list else {}
+        reasons1 = gsb_list[0][1] if gsb_list else {}
+
+        row = [
+            q_data["qid"],
+            q_data["prompt"][:200],
+            video.pe_prompt[:200] if video.pe_prompt else "",
+            round(q_data["a_score"], 1) if q_data["a_score"] is not None else "",
+            round(q_data["b_score"], 1) if q_data["b_score"] is not None else "",
+            round(q_data["delta"], 1) if q_data["delta"] is not None else "",
+            gsb_labels.get(gsb1.get("dynamics", ""), ""),
+            reasons1.get("dynamics", ""),
+            gsb_labels.get(gsb1.get("audio", ""), ""),
+            reasons1.get("audio", ""),
+            gsb_labels.get(gsb1.get("camera", ""), ""),
+            reasons1.get("camera", ""),
+            gsb_labels.get(gsb1.get("aesthetics", ""), ""),
+            reasons1.get("aesthetics", ""),
+            gsb_labels.get(gsb1.get("overall", ""), ""),
+            reasons1.get("overall", ""),
+        ]
+
+        if is_dual:
+            # Second annotator's GSB
+            gsb2 = gsb_list[1][0] if len(gsb_list) > 1 else {}
+            reasons2 = gsb_list[1][1] if len(gsb_list) > 1 else {}
+            reason_parts = [f"{k}:{v}" for k, v in reasons2.items()] if reasons2 else []
+            row += [
+                gsb_labels.get(gsb2.get("dynamics", ""), ""),
+                gsb_labels.get(gsb2.get("audio", ""), ""),
+                gsb_labels.get(gsb2.get("camera", ""), ""),
+                gsb_labels.get(gsb2.get("aesthetics", ""), ""),
+                gsb_labels.get(gsb2.get("overall", ""), ""),
+                "; ".join(reason_parts) if reason_parts else "",
+            ]
+
+        row += [q_data["a_n"], q_data["b_n"]]
+        ws3.append(row)
+
+    # ========== Sheet 4: 原始标注 ==========
+    ws4 = wb.create_sheet("原始标注")
+    ws4.append(["题目ID", "检查点ID", "能力ID", "能力名称", "标注员", "目标(A/B)", "判定", "失败码", "备注"])
+    _style_header(ws4)
+
+    ann_query = db.query(Annotation).join(Assignment, Annotation.assignment_id == Assignment.id).join(
+        Video, Assignment.video_id == Video.id
+    ).filter(Video.batch_id == batch_id)
+
+    for ann in ann_query.all():
+        asgn = ann.assignment
+        video = asgn.video
+        cp = ann.checkpoint
+        q = cp.question if cp else None
+        user = asgn.annotator
+        ws4.append([
+            q.question_id if q else "",
+            cp.checkpoint_id if cp else "",
+            cp.ability_id if cp else "",
+            cp.ability_name if cp else "",
+            user.display_name or user.username if user else "",
+            ann.target or "",
+            ann.score,
+            ann.fail_code or "",
+            ann.note or "",
+        ])
+
+    # ========== Sheet 5: 标注员统计 ==========
+    ws5 = wb.create_sheet("标注员统计")
+    ws5.append(["标注员", "姓名", "总任务", "已提交", "完成率%", "A标注数", "B标注数", "整体判定填写率%"])
+    _style_header(ws5)
+
+    annotators = db.query(User).filter(User.role.contains("annotator")).all()
+    for user in annotators:
+        assignments = db.query(Assignment).join(Video).filter(
+            Assignment.annotator_id == user.id, Video.batch_id == batch_id
+        ).all()
+        if not assignments:
+            continue
+        total = len(assignments)
+        submitted = sum(1 for a in assignments if a.status == "submitted")
+        has_comparison = sum(1 for a in assignments if a.pe_comparison)
+
+        assign_ids = [a.id for a in assignments]
+        anns = db.query(Annotation).filter(Annotation.assignment_id.in_(assign_ids)).all()
+        a_count = sum(1 for a in anns if a.target == "A")
+        b_count = sum(1 for a in anns if a.target == "B")
+
+        ws5.append([
+            user.username, user.display_name or "",
+            total, submitted,
+            round(submitted / total * 100, 1) if total else 0,
+            a_count, b_count,
+            round(has_comparison / total * 100, 1) if total else 0,
+        ])
+
+    # Auto-width
+    for ws in wb.worksheets:
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or "")) for cell in col)
+            ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 50)
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    batch_name = batch.name if batch else "PE"
+    # Sanitize filename for HTTP header (avoid non-ASCII)
+    safe_name = "".join(c if c.isascii() and c.isalnum() or c in "-_" else "_" for c in batch_name)
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=PE_evaluation_report_{safe_name}.xlsx"},
+    )
+
+
+def _export_base_results(project_id: int, batch_id: int, db: Session):
+    """基础评测导出（原有逻辑）"""
+    wb = Workbook()
+
     ws1 = wb.active
     ws1.title = "能力得分排名"
     ws1.append(["能力ID", "能力名称", "得分", "C数", "R数", "N数", "有效n", "C率%", "R率%", "N率%", "覆盖状态", "主要失败码", "主要三级标签"])

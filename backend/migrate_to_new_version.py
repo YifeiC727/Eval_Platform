@@ -38,6 +38,7 @@ print('  batch_members ✓')
 print('[3/5] 添加新列...')
 alter_cmds = [
     ('eval_batches', 'fail_code_mode', 'TEXT DEFAULT "optional"'),
+    ('eval_batches', 'task_type', 'TEXT DEFAULT "t2v"'),
     ('questions', 'video_url', 'TEXT'),
     ('questions', 'project_id', 'INTEGER'),
 ]

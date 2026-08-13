@@ -32,8 +32,12 @@ def list_batches(db: Session = Depends(get_db)):
             "bank_id": b.bank_id,
             "bank_name": b.bank.name if b.bank else "",
             "model_version": b.model_version,
+            "task_type": b.task_type or "t2v",
+            "eval_mode": b.eval_mode or "base",
             "annotation_mode": b.annotation_mode,
             "fail_code_mode": b.fail_code_mode or "optional",
+            "pe_checkpoint_mode": b.pe_checkpoint_mode or "required",
+            "pe_hide_source": b.pe_hide_source if b.pe_hide_source is not None else 1,
             "status": b.status,
             "description": b.description or "",
             "total_videos": total_videos,
@@ -61,8 +65,12 @@ def create_batch(data: dict, db: Session = Depends(get_db)):
         name=data.get("name", f"{bank.name} - {data.get('model_version', '')}"),
         bank_id=bank_id,
         model_version=data.get("model_version", ""),
+        task_type=data.get("task_type", "t2v"),
+        eval_mode=data.get("eval_mode", "base"),
         annotation_mode=data.get("annotation_mode", "single"),
         fail_code_mode=data.get("fail_code_mode", "optional"),
+        pe_checkpoint_mode=data.get("pe_checkpoint_mode", "required"),
+        pe_hide_source=data.get("pe_hide_source", 1),
         description=data.get("description", ""),
     )
     db.add(batch)
@@ -71,6 +79,7 @@ def create_batch(data: dict, db: Session = Depends(get_db)):
     # Create video records from bank questions
     questions = db.query(Question).filter(Question.bank_id == bank_id).all()
     video_urls = data.get("video_urls", {})  # {question_id: url}
+    is_pe = data.get("eval_mode") == "pe"
 
     for q in questions:
         seq = q.question_id.replace("Q", "")
@@ -80,6 +89,7 @@ def create_batch(data: dict, db: Session = Depends(get_db)):
             batch_id=batch.id,
             question_id=q.id,
             oss_url=url,
+            pair_b_url=q.pe_video_url if is_pe else None,
         )
         db.add(v)
 
@@ -123,6 +133,79 @@ def compare_batches(batch_a: int, batch_b: int, db: Session = Depends(get_db)):
         })
 
     comparison.sort(key=lambda x: x["delta"])
+    return {
+        "batch_a": {"id": batch_a, "name": ba.name if ba else "", "model": ba.model_version if ba else ""},
+        "batch_b": {"id": batch_b, "name": bb.name if bb else "", "model": bb.model_version if bb else ""},
+        "comparison": comparison,
+    }
+
+
+@router.get("/compare-pe")
+def compare_pe_batches(batch_a: int, batch_b: int, db: Session = Depends(get_db)):
+    """对比两个PE批次的增益Δ变化（PE v1 vs PE v2）"""
+    from collections import defaultdict
+
+    SCORE_MAP = {"C": 1.0, "R": 0.3, "N": 0.0}
+
+    def compute_pe_deltas(bid):
+        """Compute per-ability PE增益Δ for a batch"""
+        videos = db.query(Video).filter(Video.batch_id == bid).all()
+        ability_scores = defaultdict(lambda: {"a_scores": [], "b_scores": []})
+
+        for video in videos:
+            assignments = db.query(Assignment).filter(
+                Assignment.video_id == video.id, Assignment.status == "submitted"
+            ).all()
+            for asgn in assignments:
+                anns = db.query(Annotation).filter(Annotation.assignment_id == asgn.id).all()
+                for ann in anns:
+                    if ann.score not in SCORE_MAP or not ann.target:
+                        continue
+                    cp = ann.checkpoint
+                    if not cp or not cp.ability_id:
+                        continue
+                    key = cp.ability_id
+                    if ann.target == "A":
+                        ability_scores[key]["a_scores"].append(SCORE_MAP[ann.score])
+                    elif ann.target == "B":
+                        ability_scores[key]["b_scores"].append(SCORE_MAP[ann.score])
+
+        results = {}
+        for aid, data in ability_scores.items():
+            a_avg = sum(data["a_scores"]) / len(data["a_scores"]) * 100 if data["a_scores"] else None
+            b_avg = sum(data["b_scores"]) / len(data["b_scores"]) * 100 if data["b_scores"] else None
+            delta = round(b_avg - a_avg, 1) if a_avg is not None and b_avg is not None else None
+            results[aid] = {"a_score": round(a_avg, 1) if a_avg else 0, "b_score": round(b_avg, 1) if b_avg else 0, "delta": delta or 0}
+        return results
+
+    ba = db.query(EvalBatch).filter(EvalBatch.id == batch_a).first()
+    bb = db.query(EvalBatch).filter(EvalBatch.id == batch_b).first()
+
+    deltas_a = compute_pe_deltas(batch_a)
+    deltas_b = compute_pe_deltas(batch_b)
+
+    all_abilities = sorted(set(list(deltas_a.keys()) + list(deltas_b.keys())))
+
+    # Get ability names
+    from app.models import Checkpoint
+    ability_names = {}
+    for aid in all_abilities:
+        cp = db.query(Checkpoint).filter(Checkpoint.ability_id == aid).first()
+        ability_names[aid] = cp.ability_name if cp else ""
+
+    comparison = []
+    for aid in all_abilities:
+        da = deltas_a.get(aid, {"delta": 0, "a_score": 0, "b_score": 0})
+        db_data = deltas_b.get(aid, {"delta": 0, "a_score": 0, "b_score": 0})
+        comparison.append({
+            "ability_id": aid,
+            "ability_name": ability_names.get(aid, ""),
+            "delta_a": da["delta"],
+            "delta_b": db_data["delta"],
+            "delta_change": round(db_data["delta"] - da["delta"], 1),
+        })
+
+    comparison.sort(key=lambda x: x["delta_change"])
     return {
         "batch_a": {"id": batch_a, "name": ba.name if ba else "", "model": ba.model_version if ba else ""},
         "batch_b": {"id": batch_b, "name": bb.name if bb else "", "model": bb.model_version if bb else ""},
@@ -182,8 +265,11 @@ def get_batch(batch_id: int, db: Session = Depends(get_db)):
         "bank_id": batch.bank_id,
         "bank_name": batch.bank.name if batch.bank else "",
         "model_version": batch.model_version,
+        "task_type": batch.task_type or "t2v",
+        "eval_mode": batch.eval_mode or "base",
         "annotation_mode": batch.annotation_mode,
         "fail_code_mode": batch.fail_code_mode or "optional",
+        "pe_hide_source": batch.pe_hide_source if batch.pe_hide_source is not None else 1,
         "status": batch.status,
         "description": batch.description,
         "total_videos": total_videos,
@@ -264,16 +350,23 @@ def preview_batch_assignment(batch_id: int, data: dict, db: Session = Depends(ge
 
 @router.post("/{batch_id}/sync-urls")
 def sync_video_urls_from_questions(batch_id: int, db: Session = Depends(get_db)):
-    """从题库的 Question.video_url 同步 URL 到该批次的 Video 记录"""
+    """从题库的 Question.video_url / pe_video_url 同步 URL 到该批次的 Video 记录"""
     batch = db.query(EvalBatch).filter(EvalBatch.id == batch_id).first()
     if not batch:
         raise HTTPException(404, "batch not found")
 
+    is_pe = batch.eval_mode == "pe"
     videos = db.query(Video).filter(Video.batch_id == batch_id).all()
     updated = 0
     for v in videos:
+        changed = False
         if v.question and v.question.video_url and not v.oss_url:
             v.oss_url = v.question.video_url
+            changed = True
+        if is_pe and v.question and v.question.pe_video_url and not v.pair_b_url:
+            v.pair_b_url = v.question.pe_video_url
+            changed = True
+        if changed:
             updated += 1
 
     db.commit()
@@ -282,12 +375,13 @@ def sync_video_urls_from_questions(batch_id: int, db: Session = Depends(get_db))
 
 @router.post("/{batch_id}/update-urls")
 def update_video_urls(batch_id: int, data: dict, db: Session = Depends(get_db)):
-    """批量更新视频URL: {"urls": {"Q0001": "http://...", "Q0002": "http://..."}}"""
+    """批量更新视频URL: {"urls": {"Q0001": "http://..."}, "pe_urls": {"Q0001": "http://..."}}"""
     batch = db.query(EvalBatch).filter(EvalBatch.id == batch_id).first()
     if not batch:
         raise HTTPException(404, "batch not found")
 
     urls = data.get("urls", {})
+    pe_urls = data.get("pe_urls", {})
     updated = 0
     for q_id, url in urls.items():
         video = db.query(Video).join(Question).filter(
@@ -295,6 +389,14 @@ def update_video_urls(batch_id: int, data: dict, db: Session = Depends(get_db)):
         ).first()
         if video:
             video.oss_url = url
+            updated += 1
+
+    for q_id, url in pe_urls.items():
+        video = db.query(Video).join(Question).filter(
+            Video.batch_id == batch_id, Question.question_id == q_id
+        ).first()
+        if video:
+            video.pair_b_url = url
             updated += 1
 
     db.commit()
@@ -675,46 +777,51 @@ def ai_confirm_batch_assignment(batch_id: int, data: dict, db: Session = Depends
     return {"status": "confirmed", "created": created, "skipped": skipped}
 
 
+@router.get("/{batch_id}/pe-gsb")
+def batch_pe_gsb(batch_id: int, db: Session = Depends(get_db)):
+    """获取PE批次每道题的GSB判断汇总"""
+    import json as json_lib
+
+    videos = db.query(Video).filter(Video.batch_id == batch_id).all()
+    results = []
+
+    for video in videos:
+        question = video.question
+        assignments = db.query(Assignment).filter(
+            Assignment.video_id == video.id, Assignment.status == "submitted"
+        ).all()
+
+        gsb_entries = []
+        for asgn in assignments:
+            if not asgn.pe_comparison:
+                continue
+            try:
+                gsb = json_lib.loads(asgn.pe_comparison)
+            except:
+                continue
+            user = asgn.annotator
+            gsb_entries.append({
+                "annotator": user.display_name if user else "",
+                "role": asgn.role,
+                "gsb": gsb,
+            })
+
+        if gsb_entries:
+            results.append({
+                "video_id": video.video_id,
+                "question_id": question.question_id if question else "",
+                "prompt": (question.prompt[:80] + "...") if question and len(question.prompt) > 80 else (question.prompt if question else ""),
+                "gsb_entries": gsb_entries,
+            })
+
+    return results
+
+
 @router.get("/{batch_id}/scores")
 def batch_scores(batch_id: int, db: Session = Depends(get_db)):
-    """获取某批次的能力得分"""
-    batch = db.query(EvalBatch).filter(EvalBatch.id == batch_id).first()
-    if not batch:
-        raise HTTPException(404, "batch not found")
-
-    SCORE_MAP = {"C": 1.0, "R": 0.3, "N": 0.0}
-
-    results = db.query(Checkpoint, FinalResult).join(
-        FinalResult, FinalResult.checkpoint_id == Checkpoint.id
-    ).join(Video, FinalResult.video_id == Video.id).filter(
-        Video.batch_id == batch_id,
-        FinalResult.final_score.in_(["C", "R", "N"]),
-    ).all()
-
-    from collections import defaultdict
-    ability_data = defaultdict(lambda: {"name": "", "scores": [], "c": 0, "r": 0, "n": 0})
-    for cp, fr in results:
-        aid = cp.ability_id or "UNKNOWN"
-        ability_data[aid]["name"] = cp.ability_name or ""
-        ability_data[aid]["scores"].append(SCORE_MAP.get(fr.final_score, 0))
-        if fr.final_score == "C": ability_data[aid]["c"] += 1
-        elif fr.final_score == "R": ability_data[aid]["r"] += 1
-        else: ability_data[aid]["n"] += 1
-
-    scores = []
-    for aid in sorted(ability_data.keys()):
-        d = ability_data[aid]
-        n = len(d["scores"])
-        score = round(sum(d["scores"]) / n * 100, 1) if n > 0 else 0
-        scores.append({
-            "ability_id": aid,
-            "ability_name": d["name"],
-            "score": score,
-            "c_count": d["c"], "r_count": d["r"], "n_count": d["n"],
-            "total_n": n,
-        })
-
-    scores.sort(key=lambda x: x["score"])
+    """获取某批次的能力得分（自动区分base/pe模式）"""
+    from app.services.scorer import compute_ability_scores
+    return compute_ability_scores(db, batch_id=batch_id)
     return scores
 
 

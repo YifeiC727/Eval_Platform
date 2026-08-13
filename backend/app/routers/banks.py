@@ -6,7 +6,7 @@ from sqlalchemy import func
 import shutil
 import os
 from app.database import get_db
-from app.models import QuestionBank, Question, Checkpoint
+from app.models import QuestionBank, Question, Checkpoint, Video
 
 router = APIRouter(prefix="/api/banks", tags=["question-banks"])
 
@@ -120,10 +120,12 @@ async def import_to_bank(
 
     # Parse 原题 sheet
     url_map = {}
+    pe_url_map = {}
     if "原题" in wb.sheetnames:
         ws = wb["原题"]
         header = [str(c.value or "").strip() for c in next(ws.iter_rows(min_row=1, max_row=1))]
         url_col = header.index("视频URL") if "视频URL" in header else -1
+        pe_url_col = header.index("PE视频URL") if "PE视频URL" in header else -1
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         for row in rows:
             if not row[0]:
@@ -147,6 +149,14 @@ async def import_to_bank(
                 stats["questions_added"] += 1
             if url_col >= 0 and len(row) > url_col and row[url_col]:
                 url_map[q_id] = str(row[url_col]).strip()
+                q_obj = db.query(Question).filter(Question.question_id == q_id, Question.bank_id == bank_id).first()
+                if q_obj:
+                    q_obj.video_url = str(row[url_col]).strip()
+            if pe_url_col >= 0 and len(row) > pe_url_col and row[pe_url_col]:
+                pe_url_map[q_id] = str(row[pe_url_col]).strip()
+                q_obj = db.query(Question).filter(Question.question_id == q_id, Question.bank_id == bank_id).first()
+                if q_obj:
+                    q_obj.pe_video_url = str(row[pe_url_col]).strip()
         db.flush()
 
     # Parse 检查点拆解 sheet
@@ -197,9 +207,43 @@ async def import_to_bank(
                 db.add(cp)
                 stats["checkpoints_added"] += 1
 
+    # Fallback: scan all sheets for "视频URL" column if url_map is still empty
+    if not url_map:
+        for sn in wb.sheetnames:
+            ws = wb[sn]
+            header = [str(c.value or "").strip() for c in next(ws.iter_rows(min_row=1, max_row=1))]
+            if "视频URL" in header and "题目ID" in header:
+                url_col = header.index("视频URL")
+                qid_col = header.index("题目ID")
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    if not row or not row[qid_col]:
+                        continue
+                    q_id = str(row[qid_col]).strip()
+                    if q_id in url_map:
+                        continue
+                    if url_col < len(row) and row[url_col]:
+                        url_map[q_id] = str(row[url_col]).strip()
+                        q_obj = db.query(Question).filter(Question.question_id == q_id, Question.bank_id == bank_id).first()
+                        if q_obj:
+                            q_obj.video_url = str(row[url_col]).strip()
+                break
+
     # Update bank version and timestamp
     bank.version += 1
     bank.updated_at = datetime.utcnow()
+
+    # Sync video URLs to existing Video records that reference these questions
+    if url_map:
+        videos_updated = 0
+        for q_id, url in url_map.items():
+            question = db.query(Question).filter(Question.question_id == q_id, Question.bank_id == bank_id).first()
+            if question:
+                videos = db.query(Video).filter(Video.question_id == question.id, (Video.oss_url == None) | (Video.oss_url == "")).all()
+                for v in videos:
+                    v.oss_url = url
+                    videos_updated += 1
+        stats["videos_url_synced"] = videos_updated
+
     db.commit()
     wb.close()
 

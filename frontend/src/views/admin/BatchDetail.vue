@@ -206,25 +206,115 @@
         </el-table>
 
         <!-- 查看详情弹窗 -->
-        <el-dialog v-model="showDetailDialog" :title="'标注对比 - ' + (detailData?.video_id || '')" width="900px" top="5vh">
+        <el-dialog v-model="showDetailDialog" :title="'标注对比 - ' + (detailData?.video_id || '')" width="950px" top="5vh">
           <div v-if="detailData" style="max-height: 70vh; overflow-y: auto;">
-            <div style="margin-bottom: 12px;">
-              <div style="font-size: 13px; color: #333; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #eee;">
-                <b>{{ detailData.question_id }}</b>: {{ detailData.prompt }}
-              </div>
-              <div v-if="detailData.video_url" style="margin-top: 8px;">
-                <video controls preload="metadata" style="width: 100%; max-height: 300px; border-radius: 6px; background: #000;" :src="detailData.video_url"></video>
-              </div>
-              <div v-else style="margin-top: 4px; font-size: 12px; color: #999;">无视频URL</div>
+            <!-- Prompt -->
+            <div style="font-size: 13px; color: #333; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid #eee; margin-bottom: 12px;">
+              <b>{{ detailData.question_id }}</b>: {{ detailData.prompt }}
             </div>
-            <div style="display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap;">
+
+            <!-- Videos: PE shows dual, base shows single -->
+            <div v-if="detailData.eval_mode === 'pe'" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
+              <div>
+                <div style="text-align: center; font-size: 12px; font-weight: 600; color: #409eff; margin-bottom: 4px;">A 直出视频</div>
+                <video v-if="detailData.video_url" controls preload="metadata" style="width: 100%; max-height: 200px; border-radius: 6px; background: #000;" :src="detailData.video_url"></video>
+                <div v-else style="height: 80px; background: #f0f0f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 12px;">无视频</div>
+              </div>
+              <div>
+                <div style="text-align: center; font-size: 12px; font-weight: 600; color: #67c23a; margin-bottom: 4px;">B PE视频</div>
+                <video v-if="detailData.pair_b_url" controls preload="metadata" style="width: 100%; max-height: 200px; border-radius: 6px; background: #000;" :src="detailData.pair_b_url"></video>
+                <div v-else style="height: 80px; background: #f0f0f0; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 12px;">无视频</div>
+              </div>
+            </div>
+            <div v-else style="margin-bottom: 12px;">
+              <video v-if="detailData.video_url" controls preload="metadata" style="width: 100%; max-height: 250px; border-radius: 6px; background: #000;" :src="detailData.video_url"></video>
+              <div v-else style="font-size: 12px; color: #999;">无视频URL</div>
+            </div>
+
+            <!-- Annotator tags -->
+            <div style="display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap;">
               <el-tag v-for="(info, role) in detailData.roles" :key="role"
                 :type="role === 'expert' ? 'danger' : role === 'third' ? 'warning' : role === 'A' ? 'primary' : 'success'"
                 size="small">
                 {{ role === 'third' ? 'C' : role }}={{ info.annotator }} ({{ info.status === 'submitted' ? '已提交' : '进行中' }})
               </el-tag>
             </div>
-            <el-table :data="detailData.checkpoints" border size="small" stripe>
+
+            <!-- PE mode: dual scoring table -->
+            <div v-if="detailData.eval_mode === 'pe'">
+              <!-- Single annotator: simple A/B columns -->
+              <el-table v-if="Object.keys(detailData.roles || {}).length <= 1" :data="detailData.checkpoints" border size="small" stripe>
+                <el-table-column prop="checkpoint_id" label="检查点" width="100" fixed />
+                <el-table-column prop="text" label="内容" min-width="150" show-overflow-tooltip fixed />
+                <el-table-column label="A" width="60">
+                  <template #default="{ row }">
+                    <span :style="scoreStyle(getPeScore(row, 'A'))">{{ getPeScore(row, 'A') || '-' }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="B" width="60">
+                  <template #default="{ row }">
+                    <span :style="scoreStyle(getPeScore(row, 'B'))">{{ getPeScore(row, 'B') || '-' }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="定案A" width="60">
+                  <template #default="{ row }">
+                    <span :style="scoreStyle(row.final_score_a)" style="font-weight: 600;">{{ row.final_score_a || '-' }}</span>
+                  </template>
+                </el-table-column>
+                <el-table-column label="定案B" width="60">
+                  <template #default="{ row }">
+                    <span :style="scoreStyle(row.final_score_b)" style="font-weight: 600;">{{ row.final_score_b || '-' }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+
+              <!-- Dual/triple annotator: nested headers -->
+              <el-table v-else :data="detailData.checkpoints" border size="small" stripe>
+                <el-table-column prop="checkpoint_id" label="检查点" width="100" fixed />
+                <el-table-column prop="text" label="内容" min-width="150" show-overflow-tooltip fixed />
+                <el-table-column label="—— 视频A ——">
+                  <el-table-column v-for="(info, role) in detailData.roles" :key="'a'+role" :label="role === 'third' ? 'C' : role" width="60">
+                    <template #default="{ row }"><span :style="scoreStyle(row[role+'_scoreA']?.score)">{{ row[role+'_scoreA']?.score || '-' }}</span></template>
+                  </el-table-column>
+                  <el-table-column label="定案" width="50">
+                    <template #default="{ row }"><span style="font-weight: 600;">{{ row.final_score_a || '-' }}</span></template>
+                  </el-table-column>
+                </el-table-column>
+                <el-table-column label="—— 视频B ——">
+                  <el-table-column v-for="(info, role) in detailData.roles" :key="'b'+role" :label="role === 'third' ? 'C' : role" width="60">
+                    <template #default="{ row }"><span :style="scoreStyle(row[role+'_scoreB']?.score)">{{ row[role+'_scoreB']?.score || '-' }}</span></template>
+                  </el-table-column>
+                  <el-table-column label="定案" width="50">
+                    <template #default="{ row }"><span style="font-weight: 600;">{{ row.final_score_b || '-' }}</span></template>
+                  </el-table-column>
+                </el-table-column>
+              </el-table>
+
+              <!-- PE GSB Summary -->
+              <div v-if="detailData.pe_gsb_summary && Object.keys(detailData.pe_gsb_summary).length" style="margin-top: 16px;">
+                <div style="font-weight: 600; margin-bottom: 10px;">整体比较</div>
+                <el-table :data="peGsbDimRows" border size="small">
+                  <el-table-column prop="dim_label" label="维度" width="130" />
+                  <el-table-column v-for="ann in peGsbAnnotators" :key="ann.role" :label="ann.role === 'third' ? 'C' : ann.role" min-width="160">
+                    <template #default="{ row }">
+                      <div v-if="row[ann.role]" style="display: flex; align-items: center; gap: 6px;">
+                        <el-tag size="small"
+                          :type="row[ann.role] === 'b_better' ? 'success' : row[ann.role] === 'a_better' ? 'danger' : 'info'">
+                          {{ row[ann.role] === 'a_better' ? 'A更好' : row[ann.role] === 'b_better' ? 'B更好' : row[ann.role] === 'same_good' ? '一样好' : '一样差' }}
+                        </el-tag>
+                        <span v-if="row[ann.role + '_reason']" style="font-size: 11px; color: #666;">
+                          {{ row[ann.role + '_reason'] }}
+                        </span>
+                      </div>
+                      <span v-else style="color: #ccc;">-</span>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </div>
+
+            <!-- Base mode: existing table -->
+            <el-table v-else :data="detailData.checkpoints" border size="small" stripe>
               <el-table-column prop="checkpoint_id" label="检查点" width="110" />
               <el-table-column prop="text" label="内容" min-width="200" show-overflow-tooltip />
               <el-table-column label="A" width="55">
@@ -281,20 +371,78 @@
       </el-tab-pane>
 
       <el-tab-pane label="得分结果" name="scores">
-        <el-table :data="scores" stripe v-if="scores.length">
-          <el-table-column prop="ability_id" label="ID" width="60" />
-          <el-table-column prop="ability_name" label="能力" min-width="180" />
-          <el-table-column prop="score" label="得分" width="80" sortable>
-            <template #default="{ row }">
-              <span :style="{ color: row.score < 50 ? '#e6393e' : row.score < 70 ? '#e6a23c' : '#67c23a', fontWeight: 600 }">{{ row.score }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="C/R/N" width="100">
-            <template #default="{ row }">{{ row.c_count }}/{{ row.r_count }}/{{ row.n_count }}</template>
-          </el-table-column>
-          <el-table-column prop="total_n" label="n" width="60" />
-        </el-table>
-        <el-empty v-else description="暂无定案数据" />
+        <!-- PE mode scores -->
+        <div v-if="batch.eval_mode === 'pe'">
+          <h3 style="margin-bottom: 12px; font-size: 15px;">能力项得分（检查点维度）</h3>
+          <el-table :data="scores" stripe v-if="scores.length" size="small">
+            <el-table-column prop="ability_id" label="ID" width="60" />
+            <el-table-column prop="ability_name" label="能力" min-width="160" />
+            <el-table-column label="A(直出)" width="80" sortable sort-by="a_score">
+              <template #default="{ row }">
+                <span style="color: #409eff;">{{ row.a_score ?? '-' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="B(PE)" width="80" sortable sort-by="score">
+              <template #default="{ row }">
+                <span style="color: #67c23a; font-weight: 600;">{{ row.score }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="Δ增益" width="80" sortable sort-by="delta">
+              <template #default="{ row }">
+                <span :style="{ color: (row.delta || 0) > 0 ? '#67c23a' : (row.delta || 0) < 0 ? '#e6393e' : '#999', fontWeight: 600 }">
+                  {{ (row.delta || 0) > 0 ? '+' : '' }}{{ row.delta ?? '-' }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="C/R/N" width="90">
+              <template #default="{ row }">{{ row.c_count }}/{{ row.r_count }}/{{ row.n_count }}</template>
+            </el-table-column>
+            <el-table-column prop="total_n" label="n" width="50" />
+            <el-table-column prop="coverage_status" label="覆盖" width="80">
+              <template #default="{ row }">
+                <el-tag :type="row.coverage_status === '正式排名' ? 'success' : row.coverage_status === '初步趋势' ? 'warning' : 'danger'" size="small">
+                  {{ row.coverage_status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-else description="暂无PE标注数据" />
+
+          <h3 style="margin: 24px 0 12px; font-size: 15px;">整体比较（GSB维度 · 题目级）</h3>
+          <el-table :data="peGsbPerQuestion" stripe v-if="peGsbPerQuestion.length" size="small">
+            <el-table-column prop="video_id" label="视频" width="70" />
+            <el-table-column prop="question_id" label="题目" width="70" />
+            <el-table-column prop="prompt" label="Prompt" min-width="150" show-overflow-tooltip />
+            <el-table-column v-for="dim in peGsbDimKeys" :key="dim" :label="DIM_LABELS_MAP[dim] || dim" width="90">
+              <template #default="{ row }">
+                <el-tag v-if="getGsbValue(row, dim)" size="small"
+                  :type="getGsbValue(row, dim) === 'b_better' ? 'success' : getGsbValue(row, dim) === 'a_better' ? 'danger' : 'info'">
+                  {{ getGsbValue(row, dim) === 'a_better' ? 'A更好' : getGsbValue(row, dim) === 'b_better' ? 'B更好' : getGsbValue(row, dim) === 'same_good' ? '一样好' : '一样差' }}
+                </el-tag>
+                <span v-else style="color: #ccc;">-</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-else description="暂无GSB数据" :image-size="40" />
+        </div>
+
+        <!-- Base mode scores (existing) -->
+        <div v-else>
+          <el-table :data="scores" stripe v-if="scores.length">
+            <el-table-column prop="ability_id" label="ID" width="60" />
+            <el-table-column prop="ability_name" label="能力" min-width="180" />
+            <el-table-column prop="score" label="得分" width="80" sortable>
+              <template #default="{ row }">
+                <span :style="{ color: row.score < 50 ? '#e6393e' : row.score < 70 ? '#e6a23c' : '#67c23a', fontWeight: 600 }">{{ row.score }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="C/R/N" width="100">
+              <template #default="{ row }">{{ row.c_count }}/{{ row.r_count }}/{{ row.n_count }}</template>
+            </el-table-column>
+            <el-table-column prop="total_n" label="n" width="60" />
+          </el-table>
+          <el-empty v-else description="暂无定案数据" />
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="导出" name="export">
@@ -319,6 +467,25 @@ const assigning = ref(false)
 const assignResult = ref('')
 const progress = ref([])
 const scores = ref([])
+const peGsbPerQuestion = ref([])
+
+const DIM_LABELS_MAP = { dynamics: '动态与物理', camera: '镜头语言', aesthetics: '视觉美学', audio: '声音效果', overall: '综合评价' }
+const peGsbDimKeys = computed(() => {
+  if (!peGsbPerQuestion.value.length) return []
+  const dims = new Set()
+  for (const q of peGsbPerQuestion.value) {
+    for (const entry of q.gsb_entries) {
+      Object.keys(entry.gsb).forEach(k => dims.add(k))
+    }
+  }
+  return ['dynamics', 'camera', 'aesthetics', 'audio', 'overall'].filter(d => dims.has(d))
+})
+
+function getGsbValue(row, dim) {
+  if (!row.gsb_entries || !row.gsb_entries.length) return null
+  // Use first annotator's GSB (single mode), or show consensus/first
+  return row.gsb_entries[0]?.gsb?.[dim] || null
+}
 const filterStatus = ref('')
 const filterAnnotator = ref('')
 const assignedAnnotators = ref([])
@@ -629,10 +796,47 @@ function scoreStyle(score) {
   return { color: '#ccc' }
 }
 
+function getPeScore(row, target) {
+  // Look through all roles for the score on this target (A or B)
+  if (!detailData.value?.roles) return null
+  for (const role of Object.keys(detailData.value.roles)) {
+    const key = `${role}_score${target}`
+    if (row[key]?.score) return row[key].score
+  }
+  return null
+}
+
 function methodLabel(method) {
   const map = { consensus: '一致', majority: '多数票', expert: '专家', pending_expert: '待专家', single: '单人' }
   return map[method] || method || ''
 }
+
+const DIM_LABELS = { dynamics: '动态与物理', camera: '镜头语言', aesthetics: '视觉美学', audio: '声音效果', overall: '综合评价' }
+
+const peGsbAnnotators = computed(() => {
+  if (!detailData.value?.pe_gsb_summary) return []
+  return Object.entries(detailData.value.pe_gsb_summary).map(([role, info]) => ({
+    role, annotator: info.annotator
+  }))
+})
+
+const peGsbDimRows = computed(() => {
+  if (!detailData.value?.pe_gsb_summary) return []
+  const dims = ['dynamics', 'camera', 'aesthetics', 'audio', 'overall']
+  const rows = []
+  for (const dim of dims) {
+    const row = { dim, dim_label: DIM_LABELS[dim] || dim }
+    let hasDim = false
+    for (const [role, info] of Object.entries(detailData.value.pe_gsb_summary)) {
+      try {
+        const gsb = JSON.parse(info.gsb || '{}')
+        if (gsb[dim]) { row[role] = gsb[dim]; hasDim = true }
+      } catch {}
+    }
+    if (hasDim) rows.push(row)
+  }
+  return rows
+})
 
 async function loadProgress() {
   if (!props.batch) return
@@ -647,6 +851,11 @@ async function loadScores() {
   try {
     const { data } = await api.get(`/batches/${props.batch.id}/scores`)
     scores.value = data
+    // Load PE GSB if PE mode
+    if (props.batch.eval_mode === 'pe') {
+      const { data: gsb } = await api.get(`/batches/${props.batch.id}/pe-gsb`)
+      peGsbPerQuestion.value = gsb
+    }
   } catch {}
 }
 

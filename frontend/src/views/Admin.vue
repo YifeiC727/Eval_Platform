@@ -101,17 +101,10 @@ async function loadExpertTasks() {
   if (!user.id) return
   try {
     const { data } = await api.get('/assignments/my', { params: { user_id: user.id } })
-    expertTasks.value = data.filter(t => t.role === 'expert' && t.status !== 'submitted')
-    // Also load invalid tasks (expert tasks where all A/B/C reported invalid)
-    invalidTasks.value = data.filter(t => t.role === 'expert' && t.status === 'pending')
-      .filter(t => {
-        // We can't easily distinguish here, so show all pending expert tasks
-        // The drop button will handle the actual logic
-        return true
-      })
-    // Actually: separate by checking if it's a technical invalid review
-    // For now, expert tasks with checkpoint_count = total (all cps) are likely invalid reviews
-    // Real distinction: check compare-view for the video
+    const allExpert = data.filter(t => t.role === 'expert' && t.status !== 'submitted')
+    // Separate by type: technical invalid (has issue_type marker) vs disagreement
+    invalidTasks.value = allExpert.filter(t => t.is_invalid_review)
+    expertTasks.value = allExpert.filter(t => !t.is_invalid_review)
   } catch {}
 }
 

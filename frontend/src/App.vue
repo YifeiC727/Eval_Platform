@@ -5,11 +5,11 @@
         <el-header style="background: #2c3e50; display: flex; align-items: center; justify-content: space-between;">
           <div style="display: flex; align-items: center; gap: 24px;">
             <span style="color: #fff; font-size: 18px; font-weight: 600;">V6 T2V 评测平台</span>
-            <el-menu mode="horizontal" :default-active="$route.path" router
+            <el-menu mode="horizontal" :default-active="$route.path" router :ellipsis="false"
               background-color="#2c3e50" text-color="#bdc3c7" active-text-color="#fff"
               style="border: none;">
               <el-menu-item v-if="user.role !== 'admin'" index="/tasks">我的任务</el-menu-item>
-              <el-menu-item index="/dashboard">结果看板</el-menu-item>
+              <el-menu-item v-if="user.role === 'admin' || user.role === 'lead'" index="/dashboard">结果看板</el-menu-item>
               <el-menu-item v-if="user.role === 'admin'" index="/admin">管理后台</el-menu-item>
             </el-menu>
           </div>
@@ -36,15 +36,15 @@ import zhCn from 'element-plus/es/locale/lang/zh-cn'
 const router = useRouter()
 const route = useRoute()
 
-const user = ref(JSON.parse(localStorage.getItem('user') || '{}'))
+const user = ref(JSON.parse(sessionStorage.getItem('user') || '{}'))
 const isLoggedIn = computed(() => !!user.value.id)
 
 watch(() => route.path, () => {
-  user.value = JSON.parse(localStorage.getItem('user') || '{}')
+  user.value = JSON.parse(sessionStorage.getItem('user') || '{}')
 })
 
 function logout() {
-  localStorage.removeItem('user')
+  sessionStorage.removeItem('user')
   user.value = {}
   router.push('/login')
 }

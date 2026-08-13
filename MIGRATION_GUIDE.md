@@ -24,6 +24,11 @@
 | 标注对比详情 | 管理员可查看 A/B/C/专家的完整标注对比 |
 | Dashboard 批次筛选 | 能力排名/失败码/标签诊断按批次切换 |
 | 导出修复 | 按 batch_id 正确过滤所有 sheet |
+| T2AV 评测支持 | 支持文生音视频评测，48项能力(视频30+声音12+同步6) |
+| 任务类型分组 | 批次区分 T2V/T2AV，看板按类型筛选 |
+| T2AV 失败码 | 视频层用F01-F11，声音/同步层R用RF01-07、N用N1-N3 |
+| 模块得分 | T2AV 展示 Visual/Audio/AV Sync/综合分 |
+| sessionStorage 登录 | 多标签页不串号 |
 
 ---
 
@@ -35,6 +40,7 @@
 |------|------|------|
 | `batch_members` 表 | 新增表 | 项目成员管理 |
 | `eval_batches.fail_code_mode` | 新增列 | 失败码模式(required/optional/disabled) |
+| `eval_batches.task_type` | 新增列 | 任务类型(t2v/t2av) |
 | `questions.video_url` | 新增列 | 题目视频URL |
 | `questions.project_id` | 新增列 | 项目ID（可能已存在） |
 
@@ -149,7 +155,46 @@ frontend/
 
 ---
 
-## 部署步骤
+## 增量部署（已部署过前版的情况）
+
+如果线上已经跑着上一版（有 `fail_code_mode`、`batch_members` 等），只需：
+
+```bash
+# 1. 覆盖代码
+# (git pull 或手动复制 backend/app/ 和 frontend/src/)
+
+# 2. 数据库加 task_type 列（已存在则跳过）
+cd backend
+python3 migrate_to_new_version.py
+# 或者手动执行:
+# sqlite3 data/eval.db "ALTER TABLE eval_batches ADD COLUMN task_type TEXT DEFAULT 't2v';"
+
+# 3. 重启后端
+pkill -f uvicorn; sleep 1
+uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+
+# 4. 前端重新构建
+cd ../frontend
+npm run build
+# 或开发模式: npm run dev
+
+# 5. 验证
+curl http://localhost:8000/api/batches/ | python3 -c "import json,sys; [print(b['name'], b.get('task_type')) for b in json.load(sys.stdin)[:3]]"
+```
+
+本次新增内容：
+- `eval_batches.task_type` 列（默认 `t2v`，可选 `t2av`）
+- T2AV 失败码验证支持（RF01-RF07, N1-N3）
+- 看板按任务类型筛选
+- 模块得分 API (`/api/scores/modules`)
+- 标注界面按检查点层级展示失败码
+- sessionStorage 替代 localStorage（多标签页不串号）
+
+已有数据完全兼容，旧批次自动为 `task_type=t2v`。
+
+---
+
+## 首次完整部署
 
 ```bash
 # 1. 覆盖代码
@@ -170,7 +215,9 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 # 6. 前端
 cd ../frontend
 npm install
-npm run dev
+npm run build
+# 生产用 nginx 托管 dist/ 并反代 /api → localhost:8000
+# 开发用: npm run dev
 
 # 7. 验证
 curl http://localhost:8000/api/batches/

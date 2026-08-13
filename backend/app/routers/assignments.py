@@ -677,6 +677,7 @@ def my_assignments(
                 checkpoint_count = len(disagreed)
 
         # For expert, count pending_expert checkpoints (or all if no pending_expert = invalid review)
+        is_invalid_review = False
         if a.role == "expert":
             from app.models import FinalResult
             pending_expert_count = db.query(FinalResult).filter(
@@ -685,7 +686,8 @@ def my_assignments(
             ).count()
             if pending_expert_count > 0:
                 checkpoint_count = pending_expert_count
-            # else: keep full checkpoint_count (expert sees all for invalid review)
+            else:
+                is_invalid_review = True
 
         batch = video.batch if video else None
 
@@ -708,6 +710,7 @@ def my_assignments(
             },
             "checkpoint_count": checkpoint_count,
             "annotated_count": annotated_count,
+            "is_invalid_review": is_invalid_review,
         })
 
     return result
@@ -791,11 +794,15 @@ def get_assignment_detail(assignment_id: int, db: Session = Depends(get_db)):
             "id": a.id,
             "role": a.role,
             "status": a.status,
+            "pe_comparison": a.pe_comparison,
+            "pe_reason": a.pe_reason,
         },
         "video": {
             "id": video.id,
             "video_id": video.video_id,
             "oss_url": video.oss_url,
+            "pair_b_url": video.pair_b_url,
+            "display_order": video.display_order,
             "duration_sec": video.duration_sec,
         },
         "question": {
@@ -804,7 +811,12 @@ def get_assignment_detail(assignment_id: int, db: Session = Depends(get_db)):
             "prompt": question.prompt,
         },
         "batch": {
+            "name": batch.name if batch else "",
             "fail_code_mode": fail_code_mode or "optional",
+            "task_type": batch.task_type if batch else "t2v",
+            "eval_mode": batch.eval_mode if batch else "base",
+            "pe_checkpoint_mode": batch.pe_checkpoint_mode if batch else "required",
+            "pe_hide_source": batch.pe_hide_source if batch and batch.pe_hide_source is not None else 1,
         },
         "checkpoints": cp_list,
     }

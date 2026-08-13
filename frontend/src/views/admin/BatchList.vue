@@ -32,7 +32,7 @@
       <el-table-column prop="created_at" label="创建时间" width="110">
         <template #default="{ row }">{{ row.created_at?.slice(0, 10) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="140">
+      <el-table-column label="操作" width="180" fixed="right">
         <template #default="{ row }">
           <el-button size="small" type="primary" link @click.stop="emit('select', row)">详情/分配</el-button>
           <el-button size="small" type="danger" link @click.stop="deleteBatch(row)">删除</el-button>
@@ -55,6 +55,21 @@
         <el-form-item label="批次名称（可选）">
           <el-input v-model="newBatch.name" placeholder="默认: 题库名 + 模型版本" />
         </el-form-item>
+        <el-form-item label="任务类型">
+          <el-radio-group v-model="newBatch.task_type">
+            <el-radio-button value="t2v">T2V（文生视频）</el-radio-button>
+            <el-radio-button value="t2av">T2AV（文生音视频）</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="评测方式">
+          <el-radio-group v-model="newBatch.eval_mode">
+            <el-radio-button value="base">基础检查点</el-radio-button>
+            <el-radio-button value="pe">PE配对评测</el-radio-button>
+          </el-radio-group>
+          <p style="color: #999; font-size: 12px; margin-top: 4px;">
+            {{ newBatch.eval_mode === 'pe' ? 'A/B配对评测：同一prompt生成两个视频(直出vs PE)，分别打分后做整体比较' : '标准检查点评测：每个视频按检查点独立打C/R/N' }}
+          </p>
+        </el-form-item>
         <el-form-item label="标注模式">
           <el-radio-group v-model="newBatch.annotation_mode">
             <el-radio-button value="single">单人标注</el-radio-button>
@@ -69,6 +84,12 @@
           </el-radio-group>
           <p style="color: #999; font-size: 12px; margin-top: 4px;">
             {{ newBatch.fail_code_mode === 'required' ? '标注R/N时必须选择失败码' : newBatch.fail_code_mode === 'optional' ? '标注R/N时可选填失败码' : '不展示失败码选项' }}
+          </p>
+        </el-form-item>
+        <el-form-item v-if="newBatch.eval_mode === 'pe'" label="隐藏视频来源">
+          <el-switch v-model="newBatch.pe_hide_source" :active-value="1" :inactive-value="0" active-text="隐藏A/B标识" inactive-text="显示" />
+          <p style="color: #999; font-size: 12px; margin-top: 4px;">
+            {{ newBatch.pe_hide_source ? '标注员只看到"左视频/右视频"，不知道哪个是PE' : '标注员可以看到"A直出/B PE"标识' }}
           </p>
         </el-form-item>
         <el-form-item label="描述">
@@ -94,7 +115,7 @@ const emit = defineEmits(['select'])
 const batchList = ref([])
 const bankList = ref([])
 const showCreate = ref(false)
-const newBatch = ref({ bank_id: null, model_version: '', name: '', annotation_mode: 'single', fail_code_mode: 'optional', description: '' })
+const newBatch = ref({ bank_id: null, model_version: '', name: '', task_type: 't2v', eval_mode: 'base', annotation_mode: 'single', fail_code_mode: 'optional', pe_hide_source: 1, description: '' })
 
 onMounted(async () => {
   await loadBatches()

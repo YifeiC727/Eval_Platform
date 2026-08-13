@@ -18,14 +18,20 @@ def submit_annotations(data: BatchAnnotationSubmit, db: Session = Depends(get_db
         raise HTTPException(400, "already submitted, cannot modify")
 
     for ann_data in data.annotations:
-        existing = db.query(Annotation).filter(
+        # PE mode: unique by (assignment, checkpoint, target)
+        query = db.query(Annotation).filter(
             Annotation.assignment_id == assignment.id,
             Annotation.checkpoint_id == ann_data.checkpoint_id,
-        ).first()
+        )
+        if ann_data.target:
+            query = query.filter(Annotation.target == ann_data.target)
+
+        existing = query.first()
 
         if existing:
             existing.score = ann_data.score
             existing.fail_code = ann_data.fail_code
+            existing.target = ann_data.target
             existing.evidence_ts = ann_data.evidence_ts
             existing.note = ann_data.note
             existing.submitted_at = datetime.utcnow()
@@ -35,10 +41,17 @@ def submit_annotations(data: BatchAnnotationSubmit, db: Session = Depends(get_db
                 checkpoint_id=ann_data.checkpoint_id,
                 score=ann_data.score,
                 fail_code=ann_data.fail_code,
+                target=ann_data.target,
                 evidence_ts=ann_data.evidence_ts,
                 note=ann_data.note,
             )
             db.add(ann)
+
+    # Save PE comparison if provided
+    pe_comparison = getattr(data, 'pe_comparison', None) or (data.__dict__.get('pe_comparison') if hasattr(data, '__dict__') else None)
+    if hasattr(data, 'pe_comparison') and data.pe_comparison:
+        assignment.pe_comparison = data.pe_comparison
+        assignment.pe_reason = data.pe_reason if hasattr(data, 'pe_reason') else None
 
     db.commit()
     return {"status": "saved", "count": len(data.annotations)}
@@ -427,6 +440,7 @@ def get_annotations(assignment_id: int, db: Session = Depends(get_db)):
             "checkpoint_id": a.checkpoint_id,
             "score": a.score,
             "fail_code": a.fail_code,
+            "target": a.target,
             "evidence_ts": a.evidence_ts,
             "note": a.note,
         }
@@ -436,7 +450,7 @@ def get_annotations(assignment_id: int, db: Session = Depends(get_db)):
 
 @router.get("/compare-view/{video_db_id}")
 def compare_view(video_db_id: int, db: Session = Depends(get_db)):
-    """管理员查看某视频所有角色的标注对比"""
+    """管理员查看某视频所有角色的标注对比（支持base和PE模式）"""
     from app.models import Video, Checkpoint, FinalResult
 
     video = db.query(Video).filter(Video.id == video_db_id).first()
@@ -444,6 +458,9 @@ def compare_view(video_db_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "video not found")
 
     question = video.question
+    batch = video.batch
+    eval_mode = batch.eval_mode if batch else "base"
+
     checkpoints = db.query(Checkpoint).filter(
         Checkpoint.question_id == question.id
     ).order_by(Checkpoint.seq).all()
@@ -452,11 +469,22 @@ def compare_view(video_db_id: int, db: Session = Depends(get_db)):
     role_map = {}
     for a in assignments:
         user = a.annotator
-        anns = {ann.checkpoint_id: ann for ann in a.annotations}
+        anns_list = a.annotations
+        # Group annotations by target (for PE mode)
+        anns_by_target = {}
+        anns_plain = {}
+        for ann in anns_list:
+            if ann.target:
+                anns_by_target.setdefault(ann.target, {})[ann.checkpoint_id] = ann
+            else:
+                anns_plain[ann.checkpoint_id] = ann
         role_map[a.role] = {
             "annotator": user.display_name if user else "",
             "status": a.status,
-            "annotations": anns,
+            "annotations": anns_plain,
+            "annotations_by_target": anns_by_target,
+            "pe_comparison": a.pe_comparison,
+            "pe_reason": a.pe_reason,
         }
 
     finals = {f.checkpoint_id: f for f in db.query(FinalResult).filter(FinalResult.video_id == video.id).all()}
@@ -467,18 +495,32 @@ def compare_view(video_db_id: int, db: Session = Depends(get_db)):
             "checkpoint_id": cp.checkpoint_id,
             "text": cp.text,
             "ability_name": cp.ability_name or "",
-            "A": None,
-            "B": None,
-            "third": None,
-            "expert": None,
             "final_score": None,
             "final_method": None,
         }
-        for role in ("A", "B", "third", "expert"):
-            if role in role_map:
-                ann = role_map[role]["annotations"].get(cp.id)
-                if ann:
-                    row[role] = {"score": ann.score, "fail_code": ann.fail_code, "note": ann.note}
+
+        if eval_mode == "pe":
+            # PE mode: show scores per target (A/B video) per annotator role
+            for role in ("A", "B", "third", "expert"):
+                if role in role_map:
+                    target_anns = role_map[role]["annotations_by_target"]
+                    row[f"{role}_scoreA"] = target_anns.get("A", {}).get(cp.id)
+                    row[f"{role}_scoreB"] = target_anns.get("B", {}).get(cp.id)
+                    if row[f"{role}_scoreA"]:
+                        row[f"{role}_scoreA"] = {"score": row[f"{role}_scoreA"].score, "fail_code": row[f"{role}_scoreA"].fail_code}
+                    if row[f"{role}_scoreB"]:
+                        row[f"{role}_scoreB"] = {"score": row[f"{role}_scoreB"].score, "fail_code": row[f"{role}_scoreB"].fail_code}
+        else:
+            # Base mode: single score per annotator role
+            for role in ("A", "B", "third", "expert"):
+                if role in role_map:
+                    ann = role_map[role]["annotations"].get(cp.id)
+                    if ann:
+                        row[role] = {"score": ann.score, "fail_code": ann.fail_code, "note": ann.note}
+                    else:
+                        row[role] = None
+                else:
+                    row[role] = None
 
         fr = finals.get(cp.id)
         if fr:
@@ -487,11 +529,26 @@ def compare_view(video_db_id: int, db: Session = Depends(get_db)):
 
         rows.append(row)
 
+    # Build PE GSB summary per annotator
+    pe_gsb_summary = {}
+    if eval_mode == "pe":
+        for role, info in role_map.items():
+            if info["pe_comparison"]:
+                pe_gsb_summary[role] = {
+                    "gsb": info["pe_comparison"],
+                    "reason": info["pe_reason"],
+                    "annotator": info["annotator"],
+                }
+
     return {
         "video_id": video.video_id,
         "video_url": video.oss_url or "",
+        "pair_b_url": video.pair_b_url or "",
+        "display_order": video.display_order or "ab",
+        "eval_mode": eval_mode,
         "question_id": question.question_id,
         "prompt": question.prompt,
         "roles": {role: {"annotator": info["annotator"], "status": info["status"]} for role, info in role_map.items()},
+        "pe_gsb_summary": pe_gsb_summary,
         "checkpoints": rows,
     }

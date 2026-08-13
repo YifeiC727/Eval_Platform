@@ -96,6 +96,7 @@ class AnnotationSubmit(BaseModel):
     checkpoint_id: int
     score: str
     fail_code: Optional[str] = None
+    target: Optional[str] = None
     evidence_ts: Optional[str] = None
     note: Optional[str] = None
 
@@ -112,14 +113,21 @@ class AnnotationSubmit(BaseModel):
         score = info.data.get("score")
         if score == "C" and v:
             raise ValueError("C must not have a fail_code")
-        if v and v not in [f"F{i:02d}" for i in range(1, 12)]:
-            raise ValueError("fail_code must be F01-F11")
+        valid_codes = (
+            [f"F{i:02d}" for i in range(1, 12)] +
+            [f"RF{i:02d}" for i in range(1, 8)] +
+            ["N1", "N2", "N3"]
+        )
+        if v and v not in valid_codes:
+            raise ValueError(f"invalid fail_code: {v}")
         return v
 
 
 class BatchAnnotationSubmit(BaseModel):
     assignment_id: int
     annotations: list[AnnotationSubmit]
+    pe_comparison: Optional[str] = None
+    pe_reason: Optional[str] = None
 
 
 class FinalResultOut(BaseModel):
