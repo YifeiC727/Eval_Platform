@@ -39,8 +39,18 @@ print('[3/5] 添加新列...')
 alter_cmds = [
     ('eval_batches', 'fail_code_mode', 'TEXT DEFAULT "optional"'),
     ('eval_batches', 'task_type', 'TEXT DEFAULT "t2v"'),
+    ('eval_batches', 'eval_mode', 'TEXT DEFAULT "base"'),
+    ('eval_batches', 'pe_checkpoint_mode', 'TEXT DEFAULT "required"'),
+    ('eval_batches', 'pe_hide_source', 'INTEGER DEFAULT 1'),
     ('questions', 'video_url', 'TEXT'),
+    ('questions', 'pe_video_url', 'TEXT'),
     ('questions', 'project_id', 'INTEGER'),
+    ('videos', 'pair_b_url', 'TEXT'),
+    ('videos', 'pe_prompt', 'TEXT'),
+    ('videos', 'display_order', 'VARCHAR(2)'),
+    ('assignments', 'pe_comparison', 'TEXT'),
+    ('assignments', 'pe_reason', 'TEXT'),
+    ('annotations', 'target', 'VARCHAR(2)'),
 ]
 for table, col, col_type in alter_cmds:
     try:
@@ -59,6 +69,17 @@ print(f'  失败码修复: annotations={n1+n2}, final_results={n3+n4}')
 
 # 5. 从现有 assignments 自动生成 batch_members
 print('[5/5] 生成 batch_members...')
+# 去重并确保唯一约束
+cur.execute('''
+DELETE FROM batch_members
+WHERE id NOT IN (
+    SELECT MIN(id) FROM batch_members GROUP BY batch_id, user_id
+)
+''')
+cur.execute('''
+CREATE UNIQUE INDEX IF NOT EXISTS uq_batch_members_batch_user
+ON batch_members(batch_id, user_id)
+''')
 cur.execute('''
 INSERT OR IGNORE INTO batch_members (batch_id, user_id, added_at)
 SELECT DISTINCT v.batch_id, a.annotator_id, datetime('now')
