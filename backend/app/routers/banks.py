@@ -136,27 +136,31 @@ async def import_to_bank(
                 existing.prompt = str(row[2]) if row[2] else existing.prompt
                 existing.language = str(row[3]) if row[3] else existing.language
                 existing.preprocess_note = str(row[4]) if row[4] else existing.preprocess_note
+                if url_col >= 0 and len(row) > url_col and row[url_col]:
+                    existing.video_url = str(row[url_col]).strip()
+                    url_map[q_id] = existing.video_url
+                if pe_url_col >= 0 and len(row) > pe_url_col and row[pe_url_col]:
+                    existing.pe_video_url = str(row[pe_url_col]).strip()
+                    pe_url_map[q_id] = existing.pe_video_url
                 stats["questions_updated"] += 1
             else:
+                video_url = str(row[url_col]).strip() if url_col >= 0 and len(row) > url_col and row[url_col] else None
+                pe_video_url = str(row[pe_url_col]).strip() if pe_url_col >= 0 and len(row) > pe_url_col and row[pe_url_col] else None
                 q = Question(
                     question_id=q_id,
                     bank_id=bank_id,
                     prompt=str(row[2]) if row[2] else "",
                     language=str(row[3]) if row[3] else None,
                     preprocess_note=str(row[4]) if row[4] else None,
+                    video_url=video_url,
+                    pe_video_url=pe_video_url,
                 )
                 db.add(q)
+                if video_url:
+                    url_map[q_id] = video_url
+                if pe_video_url:
+                    pe_url_map[q_id] = pe_video_url
                 stats["questions_added"] += 1
-            if url_col >= 0 and len(row) > url_col and row[url_col]:
-                url_map[q_id] = str(row[url_col]).strip()
-                q_obj = db.query(Question).filter(Question.question_id == q_id, Question.bank_id == bank_id).first()
-                if q_obj:
-                    q_obj.video_url = str(row[url_col]).strip()
-            if pe_url_col >= 0 and len(row) > pe_url_col and row[pe_url_col]:
-                pe_url_map[q_id] = str(row[pe_url_col]).strip()
-                q_obj = db.query(Question).filter(Question.question_id == q_id, Question.bank_id == bank_id).first()
-                if q_obj:
-                    q_obj.pe_video_url = str(row[pe_url_col]).strip()
         db.flush()
 
     # Parse 检查点拆解 sheet
