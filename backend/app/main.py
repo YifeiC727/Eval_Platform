@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.database import engine, Base
-from app.routers import projects, import_data, assignments, annotations, arbitration, scores, export, stats, issues, qc, banks, batches
+from app.routers import projects, import_data, assignments, annotations, arbitration, scores, export, stats, issues, qc, banks, batches, translate
 
 Base.metadata.create_all(bind=engine)
 
@@ -33,6 +33,7 @@ app.include_router(issues.router)
 app.include_router(qc.router)
 app.include_router(banks.router)
 app.include_router(batches.router)
+app.include_router(translate.router)
 
 
 @app.get("/api/health")

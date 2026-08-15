@@ -62,8 +62,13 @@
             </div>
             <!-- Prompt (scrollbar always visible) -->
             <div class="prompt-scroll" style="max-height: 220px; background: #f8fafc; border-radius: 6px; padding: 10px; border: 1px solid #eee; overflow-y: scroll;">
-              <div style="font-size: 11px; color: #999; margin-bottom: 4px; font-weight: 600;">PROMPT ↕</div>
-              <p style="line-height: 1.6; font-size: 13px; margin: 0; white-space: pre-wrap; word-break: break-word;">{{ detail.question.prompt }}</p>
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                <span style="font-size: 11px; color: #999; font-weight: 600;">PROMPT ↕</span>
+                <el-button size="small" :type="showTranslation ? 'primary' : 'default'" @click="toggleTranslation" :loading="translating" round style="font-size: 11px; padding: 2px 10px; height: 22px;">
+                  {{ showTranslation ? '原文' : '中文' }}
+                </el-button>
+              </div>
+              <p style="line-height: 1.6; font-size: 13px; margin: 0; white-space: pre-wrap; word-break: break-word;">{{ showTranslation && translatedPrompt ? translatedPrompt : detail.question.prompt }}</p>
             </div>
           </div>
         </div>
@@ -180,8 +185,15 @@
           <el-empty v-else description="暂无视频URL" />
         </el-card>
         <el-card style="margin-top: 16px;">
-          <template #header><span style="font-weight: 600;">Prompt</span></template>
-          <p style="line-height: 1.8; white-space: pre-wrap;">{{ detail.question.prompt }}</p>
+          <template #header>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <span style="font-weight: 600;">Prompt</span>
+              <el-button size="small" :type="showTranslation ? 'primary' : 'default'" @click="toggleTranslation" :loading="translating" round>
+                {{ showTranslation ? '原文' : '中文' }}
+              </el-button>
+            </div>
+          </template>
+          <p style="line-height: 1.8; white-space: pre-wrap;">{{ showTranslation && translatedPrompt ? translatedPrompt : detail.question.prompt }}</p>
         </el-card>
       </div>
 
@@ -330,6 +342,12 @@ const FAIL_CODES_T2AV_N = [
 const taskType = computed(() => detail.value?.batch?.task_type || 't2v')
 const evalMode = computed(() => detail.value?.batch?.eval_mode || 'base')
 const batchName = computed(() => detail.value?.batch?.name || '未知批次')
+
+// Translation state (persists across questions)
+const showTranslation = ref(false)
+const translating = ref(false)
+const translatedPrompt = ref('')
+const translationCache = reactive({})  // { promptHash: translatedText }
 
 // PE mode state
 const peAnnotations = reactive({})  // {cp_id: {left: 'C', right: 'N'}}
@@ -512,6 +530,46 @@ async function loadAssignment(id) {
 
 watch(() => route.params.assignmentId, (newId) => {
   if (newId) loadAssignment(newId)
+})
+
+// Translation
+async function fetchTranslation(prompt) {
+  if (!prompt) return
+  const key = prompt.slice(0, 100)
+  if (translationCache[key]) {
+    translatedPrompt.value = translationCache[key]
+    return
+  }
+  translating.value = true
+  try {
+    const { data } = await api.post('/translate/', { text: prompt })
+    translatedPrompt.value = data.translated
+    translationCache[key] = data.translated
+  } catch {
+    translatedPrompt.value = '[翻译失败，请重试]'
+  } finally {
+    translating.value = false
+  }
+}
+
+function toggleTranslation() {
+  showTranslation.value = !showTranslation.value
+  if (showTranslation.value && !translatedPrompt.value) {
+    fetchTranslation(detail.value?.question?.prompt)
+  }
+}
+
+// Auto-fetch translation when loading a new question if translation mode is on
+watch(() => detail.value?.question?.prompt, (newPrompt) => {
+  translatedPrompt.value = ''
+  if (showTranslation.value && newPrompt) {
+    const key = newPrompt.slice(0, 100)
+    if (translationCache[key]) {
+      translatedPrompt.value = translationCache[key]
+    } else {
+      fetchTranslation(newPrompt)
+    }
+  }
 })
 
 function buildPayload() {
